@@ -1,0 +1,64 @@
+# Wayfinder Docker Compose Configuration
+# For development and local deployment
+
+version: '3.8'
+
+services:
+  # Python backend service
+  wayfinder-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wayfinder-python
+    volumes:
+      # Mount data directories for persistence
+      - wayfinder-index:/data/index
+      - wayfinder-learning:/data/learning
+      # For development: mount source code for hot reload
+      - ./md_scanner:/app/md_scanner:ro
+    environment:
+      - WAYFINDER_INDEX_DIR=/data/index
+      - WAYFINDER_LEARNING_DIR=/data/learning
+      - PYTHONUNBUFFERED=1
+    # Keep container running for Tauri subprocess calls
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "from md_scanner.learning import AdaptiveCoach"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Development helper: watch for code changes
+  wayfinder-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wayfinder-dev
+    volumes:
+      - wayfinder-index:/data/index
+      - wayfinder-learning:/data/learning
+      - ./md_scanner:/app/md_scanner
+    environment:
+      - WAYFINDER_INDEX_DIR=/data/index
+      - WAYFINDER_LEARNING_DIR=/data/learning
+      - PYTHONUNBUFFERED=1
+    command: >
+      python -c "
+      import time
+      from watchdog.observers import Observer
+      from watchdog.events import FileSystemEventHandler
+      print('Wayfinder dev mode - watching for changes...')
+      while True: time.sleep(1)
+      "
+    profiles:
+      - dev
+    depends_on:
+      - wayfinder-backend
+
+volumes:
+  wayfinder-index:
+    name: wayfinder-index
+  wayfinder-learning:
+    name: wayfinder-learning

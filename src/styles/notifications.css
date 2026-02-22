@@ -1,0 +1,45 @@
+.toast-container {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.toast-container.bottom-right {
+  right: 1rem;
+  bottom: 1rem;
+}
+
+.toast {
+  background: rgba(30,30,30,0.9);
+  color: #fff;
+  padding: 0.8rem 1rem;
+  margin-bottom: 0.6rem;
+  border-radius: 8px;
+  min-width: 240px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.3);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  pointer-events: auto;
+}
+
+.toast .toast-body { margin-right: 0.5rem; }
+.toast .toast-message { font-size: 0.9rem; color: #ddd; }
+
+.toast .toast-actions { margin-left: 0.5rem; }
+
+.toast.success { background: linear-gradient(135deg,#1e7a3a,#28b463); }
+.toast.info { background: linear-gradient(135deg,#2b6cff,#4fb3ff); }
+.toast.warning { background: linear-gradient(135deg,#ffb020,#ff7a00); }
+.toast.error { background: linear-gradient(135deg,#d9534f,#c12a2a); }
+
+.file-suggestion-card { display:flex; align-items:center; justify-content:space-between; padding:0.6rem; border:1px solid rgba(255,255,255,0.03); border-radius:6px; margin-bottom:0.4rem; background: rgba(255,255,255,0.02); }
+.file-suggestion-main { flex:1; }
+.file-suggestion-actions { margin-left:0.5rem; }
+
+.suggestion-panel { width: 360px; max-height: 70vh; overflow:auto; background: var(--panel-bg); padding: 1rem; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
+.suggestion-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:0.5rem; }
+
+.watcher-badge { padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.85rem; }
+.watcher-badge.active { background: #2bff8a; color: #083; }
+.watcher-badge.inactive { background: #ddd; color: #333; }

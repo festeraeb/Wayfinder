@@ -1,0 +1,4 @@
+src-tauri/onnxruntime*.dll filter=lfs diff=lfs merge=lfs -text
+src-tauri/onnxruntime*.lib filter=lfs diff=lfs merge=lfs -text
+src-tauri/onnxruntime_providers*.dll filter=lfs diff=lfs merge=lfs -text
+src-tauri/onnxruntime_providers*.lib filter=lfs diff=lfs merge=lfs -text

@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project-specific
+.md_index/
+*.pkl
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!src-tauri/tauri.conf.json
+!requirements.txt
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Tauri build output
+src-tauri/target/
+
+# Azure credentials (DO NOT COMMIT)
+**/azure_config.json
+
+# Wayfinder index data
+.wayfinder_index/
+
+# Temporary files
+tmpclaude-*
+*.tmp
