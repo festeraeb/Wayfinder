@@ -28,10 +28,20 @@ interface ClippySuggestion {
     priority: number;
 }
 
+interface DuplicateMeta {
+    path: string;
+    size_bytes: number;
+    modified?: string;
+}
+
 interface DuplicateFile {
     original: string;
     duplicates: string[];
     content_hash: string;
+    size_bytes?: number;
+    kept_mtime?: string;
+    original_meta?: DuplicateMeta;
+    duplicate_meta?: DuplicateMeta[];
 }
 
 interface CommitSuggestion {
@@ -71,6 +81,10 @@ export const GitAssistant: React.FC<Props> = ({ repoPath, indexPath }) => {
     const [showCopyPatterns, setShowCopyPatterns] = useState(false);
     const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(new Set());
     const [actionResult, setActionResult] = useState<string | null>(null);
+    const [chatInput, setChatInput] = useState("");
+    const [chatReply, setChatReply] = useState<string | null>(null);
+    const [chatLoading, setChatLoading] = useState(false);
+    const [chatError, setChatError] = useState<string | null>(null);
 
     const loadReport = async () => {
         if (!repoPath) return;
@@ -159,6 +173,20 @@ export const GitAssistant: React.FC<Props> = ({ repoPath, indexPath }) => {
 
     const dismissSuggestion = (id: string) => {
         setDismissedSuggestions(prev => new Set([...prev, id]));
+    };
+
+    const askLlama = async () => {
+        if (!chatInput.trim()) return;
+        setChatLoading(true);
+        setChatError(null);
+        try {
+            const res = await tauriService.chatLlama(chatInput, "qwen2.5-coder-1.5b-instruct", undefined);
+            setChatReply(res.text);
+        } catch (e) {
+            setChatError(String(e));
+        } finally {
+            setChatLoading(false);
+        }
     };
 
     const getUrgencyColor = (level: string) => {
@@ -349,6 +377,30 @@ export const GitAssistant: React.FC<Props> = ({ repoPath, indexPath }) => {
                 </div>
             )}
 
+            {/* Local LLM helper */}
+            <div className="git-chat">
+                <h3>💬 Ask Qwen (local)</h3>
+                <textarea
+                    className="folder-input"
+                    rows={3}
+                    placeholder="Ask for a quick git/code tip..."
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                />
+                <div className="actions-row">
+                    <button className="action-btn primary" onClick={askLlama} disabled={chatLoading}>
+                        {chatLoading ? "Thinking..." : "Ask"}
+                    </button>
+                </div>
+                {chatError && <div className="git-error">{chatError}</div>}
+                {chatReply && (
+                    <div className="chat-reply">
+                        <strong>Reply:</strong> {chatReply}
+                    </div>
+                )}
+                <small>Uses your local llama.cpp server at its default endpoint.</small>
+            </div>
+
             {/* Duplicates Modal */}
             {showDuplicates && report.duplicates.length > 0 && (
                 <div className="modal-overlay" onClick={() => setShowDuplicates(false)}>
@@ -363,13 +415,22 @@ export const GitAssistant: React.FC<Props> = ({ repoPath, indexPath }) => {
                                     <div className="original">
                                         <span className="label">✓ Keep:</span>
                                         <span className="path">{dup.original}</span>
+                                        {dup.original_meta && (
+                                            <span className="meta">{Math.round((dup.original_meta.size_bytes / 1024) * 10) / 10} KB · {dup.original_meta.modified || ""}</span>
+                                        )}
                                     </div>
-                                    {dup.duplicates.map((d, j) => (
+                                    {(dup.duplicate_meta && dup.duplicate_meta.length > 0 ? dup.duplicate_meta.map((m, j) => (
+                                        <div key={j} className="duplicate">
+                                            <span className="label">✗ Delete:</span>
+                                            <span className="path">{m.path}</span>
+                                            <span className="meta">{Math.round((m.size_bytes / 1024) * 10) / 10} KB · {m.modified || ""}</span>
+                                        </div>
+                                    )) : dup.duplicates.map((d, j) => (
                                         <div key={j} className="duplicate">
                                             <span className="label">✗ Delete:</span>
                                             <span className="path">{d}</span>
                                         </div>
-                                    ))}
+                                    )))}
                                 </div>
                             ))}
                         </div>

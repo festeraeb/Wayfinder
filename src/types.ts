@@ -102,11 +102,12 @@ export interface GcpConfigStatus {
     has_key: boolean; // Indicates if a service account path is stored locally
 }
 
-export type EmbeddingProvider = "local" | "azure" | "gcp";
+export type EmbeddingProvider = "local" | "llama" | "azure" | "gcp";
 
 export interface ProviderConfigStatus {
     provider: EmbeddingProvider;
     local_model?: string;
+    local_endpoint?: string;
     exists: boolean;
 }
 
@@ -218,6 +219,23 @@ export interface DuplicateFile {
     original: string;
     duplicates: string[];
     content_hash: string;
+    size_bytes: number;
+    kept_mtime?: string;
+    original_meta?: DuplicateMeta;
+    duplicate_meta?: DuplicateMeta[];
+}
+
+export interface DuplicateMeta {
+    path: string;
+    size_bytes: number;
+    modified?: string;
+}
+
+export interface FileSuggestion {
+    file_path: string;
+    suggestion: string;
+    action: string;
+    reason: string;
 }
 
 export interface CommitSuggestion {
@@ -233,4 +251,11 @@ export interface GitClippyReport {
     suggestions: ClippySuggestion[];
     duplicates: DuplicateFile[];
     commit_suggestions: CommitSuggestion[];
+}
+
+export interface NautiReport {
+    message: string;
+    scanned_files: number;
+    duplicates: DuplicateFile[];
+    copy_pattern_files: FileSuggestion[];
 }

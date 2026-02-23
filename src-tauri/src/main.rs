@@ -42,6 +42,8 @@ fn main() {
             commands::execute_clippy_action,
             commands::is_git_repo,
             commands::delete_duplicate_files,
+            commands::chat_llama,
+            commands::get_nauticlippy_report,
             // File Intelligence commands
             commands::scan_for_documents,
             commands::get_organization_suggestions,

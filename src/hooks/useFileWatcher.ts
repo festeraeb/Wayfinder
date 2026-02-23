@@ -13,7 +13,8 @@ export function useFileWatcher(options: WatcherOptions = {}) {
     const { indexPath, watchAll, customPaths } = options;
     const [active, setActive] = useState(false);
     const [events, setEvents] = useState<FileEvent[]>([]);
-    const pollHandle = useRef<NodeJS.Timer | null>(null);
+    type IntervalHandle = ReturnType<typeof setInterval>;
+    const pollHandle = useRef<IntervalHandle | null>(null);
     const running = useRef(false);
     const latestPaths = useRef<string[] | undefined>(undefined);
 

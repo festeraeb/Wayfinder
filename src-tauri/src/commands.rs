@@ -35,6 +35,7 @@ pub struct GcpConfig {
 #[serde(rename_all = "lowercase")]
 pub enum EmbeddingProvider {
     Local,
+    Llama, // local llama.cpp server (GPU/CPU)
     Azure,
     Gcp,
 }
@@ -44,6 +45,8 @@ pub struct ProviderConfig {
     pub provider: EmbeddingProvider,
     #[serde(default)]
     pub local_model: Option<String>,
+    #[serde(default)]
+    pub local_endpoint: Option<String>, // for llama.cpp http server
 }
 
 // Embedding data stored per file
@@ -194,11 +197,12 @@ fn read_provider_config(index_path: &Path) -> Option<ProviderConfig> {
     serde_json::from_str::<ProviderConfig>(&content).ok()
 }
 
-fn write_provider_config(index_path: &Path, provider: EmbeddingProvider, local_model: Option<String>) -> Result<(), String> {
+fn write_provider_config(index_path: &Path, provider: EmbeddingProvider, local_model: Option<String>, local_endpoint: Option<String>) -> Result<(), String> {
     let config_file = index_path.join("provider_config.json");
     let config = ProviderConfig {
         provider,
         local_model,
+        local_endpoint,
     };
     let json = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize provider config: {}", e))?;
@@ -215,6 +219,7 @@ fn resolve_provider_config(index_path: &Path) -> ProviderConfig {
     ProviderConfig {
         provider: EmbeddingProvider::Local,
         local_model: Some(default_local_model_name()),
+        local_endpoint: Some("http://127.0.0.1:8080".to_string()),
     }
 }
 
@@ -306,6 +311,11 @@ pub async fn scan_directory(path: String, index_dir: String, extensions: Option<
         .filter_map(|e| e.ok())
     {
         let file_path = entry.path();
+
+        // Skip anything inside .git to avoid binary blobs and noise
+        if file_path.ancestors().any(|a| a.file_name().and_then(|n| n.to_str()) == Some(".git")) {
+            continue;
+        }
 
         // Skip node_modules and other heavy dependency folders
         if file_path.to_string_lossy().to_lowercase().contains("node_modules") {
@@ -401,6 +411,9 @@ pub async fn generate_embeddings(index_dir: String, max_files: Option<usize>, ba
         EmbeddingProvider::Local => {
             generate_embeddings_local(index_dir, max_files, provider_config.local_model).await
         },
+        EmbeddingProvider::Llama => {
+            generate_embeddings_llama(index_dir, max_files, batch_size, provider_config.local_endpoint, provider_config.local_model).await
+        },
         EmbeddingProvider::Azure => {
             generate_embeddings_azure(index_dir, max_files, batch_size).await
         },
@@ -484,7 +497,7 @@ pub async fn generate_embeddings_local(_index_dir: String, _max_files: Option<us
     let mut generated_count = 0usize;
     let mut cached_count = 0usize;
     let mut skipped_count = 0usize;
-    let error_count = 0usize;
+    let mut error_count = 0usize;
 
     let max_files = _max_files.unwrap_or(index_data.files.len());
 
@@ -508,17 +521,34 @@ pub async fn generate_embeddings_local(_index_dir: String, _max_files: Option<us
             }
         }
 
-        // Read file and compute embedding
-        match fs::read_to_string(&path) {
-            Ok(content) => {
-                let emb = compute_embedding_from_text(&content, dim);
-                let ch = content_hash(&content);
-                out_embeddings.push(FileEmbedding { path: path.clone(), embedding: emb, content_hash: ch });
-                generated_count += 1;
-            },
+        // Read file with binary/UTF-8 guard and size cap
+        match fs::read(&path) {
+            Ok(bytes) => {
+                if bytes.is_empty() {
+                    skipped_count += 1;
+                    continue;
+                }
+                if bytes.len() > 2 * 1024 * 1024 { // skip >2MB in local mode to avoid heavy/binary files
+                    skipped_count += 1;
+                    continue;
+                }
+                match std::str::from_utf8(&bytes) {
+                    Ok(content) => {
+                        let emb = compute_embedding_from_text(content, dim);
+                        let ch = content_hash(content);
+                        out_embeddings.push(FileEmbedding { path: path.clone(), embedding: emb, content_hash: ch });
+                        generated_count += 1;
+                    }
+                    Err(_) => {
+                        skipped_count += 1;
+                        // No log for expected binary skip
+                    }
+                }
+            }
             Err(e) => {
                 log_error(index_path, "generate_embeddings_local", Some(&path), &format!("Failed to read file: {}", e), None);
                 skipped_count += 1;
+                error_count += 1;
             }
         }
 
@@ -544,6 +574,143 @@ pub async fn generate_embeddings_local(_index_dir: String, _max_files: Option<us
         "embeddings_skipped": skipped_count,
         "embeddings_errors": error_count,
         "embeddings_path": embeddings_file.to_string_lossy().to_string(),
+    }))
+}
+
+/// Generate embeddings via local llama.cpp HTTP server
+pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usize>, batch_size: Option<usize>, endpoint: Option<String>, model_name: Option<String>) -> Result<serde_json::Value, String> {
+    let index_path = Path::new(&index_dir);
+    let index_file = index_path.join("index.json");
+    let embeddings_file = index_path.join("embeddings.json");
+    let progress_file = index_path.join("embedding_progress.json");
+    let cancel_file = index_path.join("embedding_cancel");
+
+    if !index_file.exists() {
+        return Err("Index not found. Please scan a directory first.".to_string());
+    }
+
+    let index_content = fs::read_to_string(&index_file).map_err(|e| format!("Failed to read index: {}", e))?;
+    let index_data: IndexData = serde_json::from_str(&index_content).map_err(|e| format!("Failed to parse index: {}", e))?;
+
+    let files_to_process: Vec<FileEntry> = if let Some(max) = max_files {
+        index_data.files.into_iter().take(max).collect()
+    } else {
+        index_data.files
+    };
+
+    let client = reqwest::Client::new();
+    let base = endpoint.unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+    let url = format!("{}/v1/embeddings", base.trim_end_matches('/'));
+    let model = model_name.unwrap_or_else(|| "embedding-gemma-002".to_string());
+
+    let chunk_size = batch_size.unwrap_or(64).max(1);
+    let total_files = files_to_process.len();
+    let total_batches = (total_files + chunk_size - 1) / chunk_size;
+
+    let mut progress = BatchProgress {
+        batch_id: format!("{}", Local::now().timestamp()),
+        total_files,
+        processed_files: 0,
+        current_batch: 0,
+        total_batches,
+        batch_size: chunk_size,
+        status: "running".to_string(),
+        started_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        last_updated: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        errors: Vec::new(),
+    };
+    let _ = fs::write(&progress_file, serde_json::to_string_pretty(&progress).unwrap_or_default());
+
+    let mut embeddings: Vec<FileEmbedding> = Vec::new();
+    let mut generated_count = 0;
+    let mut error_count = 0;
+    let mut skipped_count = 0;
+
+    for (batch_idx, chunk) in files_to_process.chunks(chunk_size).enumerate() {
+        progress.current_batch = batch_idx + 1;
+
+        if cancel_file.exists() {
+            progress.status = "cancelled".to_string();
+            let _ = fs::write(&progress_file, serde_json::to_string_pretty(&progress).unwrap_or_default());
+            return Err("Embedding cancelled by user".to_string());
+        }
+
+        for file in chunk {
+            // Skip binary/large files
+            let bytes = match fs::read(&file.path) {
+                Ok(b) => b,
+                Err(_) => { skipped_count += 1; continue; }
+            };
+            if bytes.is_empty() || bytes.len() > 2 * 1024 * 1024 {
+                skipped_count += 1;
+                continue;
+            }
+            let content = match std::str::from_utf8(&bytes) {
+                Ok(c) => c,
+                Err(_) => { skipped_count += 1; continue; }
+            };
+            let truncated = if content.len() > 8000 { &content[..8000] } else { content };
+
+            let payload = serde_json::json!({
+                "model": model,
+                "input": truncated,
+            });
+
+            match client.post(&url).json(&payload).send().await {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        let err_text = resp.text().await.unwrap_or_default();
+                        error_count += 1;
+                        log_error(index_path, "llama_api_error", Some(&file.path), &err_text, Some(&resp.status().as_u16().to_string()));
+                        continue;
+                    }
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(json) => {
+                            if let Some(arr) = json.get("data").and_then(|d| d.get(0)).and_then(|d| d.get("embedding")) {
+                                if let Ok(vec) = serde_json::from_value::<Vec<f32>>(arr.clone()) {
+                                    let ch = format!("{:x}", md5_hash(truncated));
+                                    embeddings.push(FileEmbedding { path: file.path.clone(), embedding: vec, content_hash: ch });
+                                    generated_count += 1;
+                                } else {
+                                    error_count += 1;
+                                }
+                            } else {
+                                error_count += 1;
+                            }
+                        }
+                        Err(e) => {
+                            error_count += 1;
+                            log_error(index_path, "llama_parse_error", Some(&file.path), &e.to_string(), None);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error_count += 1;
+                    log_error(index_path, "llama_request_error", Some(&file.path), &e.to_string(), None);
+                }
+            }
+
+            progress.processed_files += 1;
+            progress.last_updated = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            let _ = fs::write(&progress_file, serde_json::to_string_pretty(&progress).unwrap_or_default());
+        }
+    }
+
+    let final_data = EmbeddingsData {
+        embeddings: embeddings.clone(),
+        model: model.clone(),
+        created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    };
+    let json = serde_json::to_string_pretty(&final_data).map_err(|e| format!("Failed to serialize embeddings: {}", e))?;
+    fs::write(&embeddings_file, json).map_err(|e| format!("Failed to write embeddings file: {}", e))?;
+
+    Ok(serde_json::json!({
+        "embeddings_generated": generated_count,
+        "cached_count": 0,
+        "skipped_count": skipped_count,
+        "error_count": error_count,
+        "total_files": embeddings.len(),
+        "message": format!("Generated {} embeddings ({} skipped, {} errors)", generated_count, skipped_count, error_count)
     }))
 }
 
@@ -1856,7 +2023,7 @@ pub async fn save_azure_config(
         .map_err(|e| format!("Failed to write config file: {}", e))?;
 
     // Ensure provider config is set to Azure when saving Azure config
-    let _ = write_provider_config(index_path, EmbeddingProvider::Azure, None);
+    let _ = write_provider_config(index_path, EmbeddingProvider::Azure, None, None);
     
     Ok(serde_json::json!({
         "success": true,
@@ -1909,7 +2076,7 @@ pub async fn save_gcp_config(
     fs::write(&config_file, json)
         .map_err(|e| format!("Failed to write config file: {}", e))?;
 
-    let _ = write_provider_config(index_path, EmbeddingProvider::Gcp, None);
+    let _ = write_provider_config(index_path, EmbeddingProvider::Gcp, None, None);
 
     Ok(serde_json::json!({
         "success": true,
@@ -1929,10 +2096,12 @@ pub async fn load_provider_config(index_dir: String) -> Result<serde_json::Value
     Ok(serde_json::json!({
         "provider": match config.provider {
             EmbeddingProvider::Local => "local",
+            EmbeddingProvider::Llama => "llama",
             EmbeddingProvider::Azure => "azure",
             EmbeddingProvider::Gcp => "gcp",
         },
         "local_model": config.local_model,
+        "local_endpoint": config.local_endpoint,
         "exists": index_path.join("provider_config.json").exists()
     }))
 }
@@ -1943,6 +2112,7 @@ pub async fn save_provider_config(
     index_dir: String,
     provider: String,
     local_model: Option<String>,
+    local_endpoint: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let index_path = Path::new(&index_dir);
     if !index_path.exists() {
@@ -1951,18 +2121,20 @@ pub async fn save_provider_config(
 
     let provider_enum = match provider.to_lowercase().as_str() {
         "local" => EmbeddingProvider::Local,
+        "llama" | "local_llama" | "local_gpu" => EmbeddingProvider::Llama,
         "azure" => EmbeddingProvider::Azure,
         "gcp" => EmbeddingProvider::Gcp,
-        _ => return Err("Unknown provider. Use 'local', 'azure', or 'gcp'.".to_string()),
+        _ => return Err("Unknown provider. Use 'local', 'llama', 'azure', or 'gcp'.".to_string()),
     };
 
     let model = match provider_enum {
         EmbeddingProvider::Local => Some(local_model.unwrap_or_else(default_local_model_name)),
+        EmbeddingProvider::Llama => local_model.or_else(|| Some("embedding-gemma-002".to_string())),
         EmbeddingProvider::Azure => local_model.clone(),
         EmbeddingProvider::Gcp => local_model,
     };
 
-    write_provider_config(index_path, provider_enum, model)?;
+    write_provider_config(index_path, provider_enum, model, local_endpoint)?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -2022,13 +2194,19 @@ pub async fn load_gcp_config(index_dir: String) -> Result<serde_json::Value, Str
     let config: GcpConfig = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse config: {}", e))?;
 
+    let has_key = !config.service_account_path.is_empty();
+    let has_adc = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
+        .map(|p| Path::new(&p).exists())
+        .unwrap_or(false);
+
     Ok(serde_json::json!({
-        "configured": !config.service_account_path.is_empty(),
+        "configured": has_key || has_adc,
         "project_id": config.project_id,
         "location": config.location,
         "model_id": config.model_id,
         "endpoint": config.endpoint,
-        "has_key": !config.service_account_path.is_empty()
+        "has_key": has_key,
+        "has_adc": has_adc
     }))
 }
 
@@ -2400,6 +2578,84 @@ pub async fn get_git_clippy_report(repo_path: String, index_dir: Option<String>)
         .map_err(|e| format!("Failed to serialize report: {}", e))
 }
 
+/// Get Nauticlippy report for arbitrary folders (non-git helper)
+#[tauri::command]
+pub async fn get_nauticlippy_report(paths: Vec<String>) -> Result<serde_json::Value, String> {
+    println!("[RUST] get_nauticlippy_report called for {} paths", paths.len());
+
+    // Build FileEntry list from provided paths, skipping .git and hidden files
+    let mut files: Vec<FileEntry> = Vec::new();
+
+    for root in paths {
+        let root_path = Path::new(&root);
+        if !root_path.exists() {
+            continue;
+        }
+
+        for entry in WalkDir::new(root_path)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let file_path = entry.path();
+
+            // Skip .git
+            if file_path.ancestors().any(|a| a.file_name().and_then(|n| n.to_str()) == Some(".git")) {
+                continue;
+            }
+
+            // Skip hidden files/dirs
+            if file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with('.'))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            if file_path.is_file() {
+                if let Ok(metadata) = fs::metadata(file_path) {
+                    let size = metadata.len();
+                    let modified = metadata
+                        .modified()
+                        .ok()
+                        .map(|t| DateTime::<Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
+
+                    let ext = file_path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+
+                    files.push(FileEntry {
+                        path: file_path.to_string_lossy().to_string(),
+                        name: file_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        size,
+                        modified,
+                        extension: ext,
+                    });
+                }
+            }
+        }
+    }
+
+    let duplicates = git_assistant::find_duplicates(&files);
+    let copy_patterns = git_assistant::detect_copy_patterns(&files);
+
+    Ok(serde_json::json!({
+        "message": if duplicates.is_empty() && copy_patterns.is_empty() { "Nothing to clean up" } else { "Review potential cleanups" },
+        "scanned_files": files.len(),
+        "duplicates": duplicates,
+        "copy_pattern_files": copy_patterns,
+    }))
+}
+
 /// Execute a Git Clippy action
 #[tauri::command]
 pub async fn execute_clippy_action(
@@ -2450,6 +2706,44 @@ pub async fn delete_duplicate_files(file_paths: Vec<String>) -> Result<serde_jso
         "deleted": deleted,
         "errors": errors
     }))
+}
+
+/// Lightweight local chat via llama.cpp server (OpenAI-compatible)
+#[tauri::command]
+pub async fn chat_llama(prompt: String, model: Option<String>, endpoint: Option<String>) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let base = endpoint.unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+    let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
+    let model_name = model.unwrap_or_else(|| "qwen2.5-coder-1.5b-instruct".to_string());
+
+    let payload = serde_json::json!({
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": "You are a concise coding assistant. Answer briefly."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3,
+        "max_tokens": 256
+    });
+
+    let resp = client.post(&url).json(&payload).send().await
+        .map_err(|e| format!("Request failed: {}", e))?;
+    if !resp.status().is_success() {
+        let err_text = resp.text().await.unwrap_or_default();
+        return Err(format!("Chat failed ({}): {}", resp.status(), err_text));
+    }
+
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("Parse failed: {}", e))?;
+    let text = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok(serde_json::json!({ "text": text }))
 }
 
 // ============================================================================

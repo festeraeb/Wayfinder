@@ -103,13 +103,15 @@ export const tauriService = {
 
     async saveProviderConfig(
         indexDir: string,
-        provider: Types.EmbeddingProvider,
-        localModel?: string
+        provider: Types.EmbeddingProvider | "multi",
+        localModel?: string,
+        localEndpoint?: string
     ): Promise<{ success: boolean; message: string }> {
         return invoke("save_provider_config", {
             indexDir,
             provider,
             localModel,
+            localEndpoint,
         });
     },
 
@@ -143,6 +145,14 @@ export const tauriService = {
     // Git Assistant
     async getGitClippyReport(repoPath: string, indexDir?: string): Promise<Types.GitClippyReport> {
         return invoke("get_git_clippy_report", { repoPath, indexDir });
+    },
+
+    async getNautiClippyReport(paths: string[]): Promise<Types.NautiReport> {
+        return invoke("get_nauticlippy_report", { paths });
+    },
+
+    async chatLlama(prompt: string, model?: string, endpoint?: string): Promise<{ text: string }> {
+        return invoke("chat_llama", { prompt, model, endpoint });
     },
 
     async executeClippyAction(repoPath: string, action: string, data?: any): Promise<{ success: boolean; output: string }> {

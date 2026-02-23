@@ -1,6 +1,6 @@
 // Git Clippy Assistant - Helpful git companion for ADHD developers
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,6 +27,15 @@ pub struct DuplicateFile {
     pub content_hash: String,
     pub size_bytes: u64,
     pub kept_mtime: Option<String>,
+    pub original_meta: DuplicateMeta,
+    pub duplicate_meta: Vec<DuplicateMeta>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DuplicateMeta {
+    pub path: String,
+    pub size_bytes: u64,
+    pub modified: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -235,12 +244,33 @@ pub fn find_duplicates(files: &[FileEntry]) -> Vec<DuplicateFile> {
                 .and_then(|t: std::time::SystemTime| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
                 .map(|d: std::time::Duration| d.as_secs().to_string());
 
+            let original_meta = DuplicateMeta {
+                path: keep.path.clone(),
+                size_bytes: keep.size,
+                modified: keep
+                    .mtime
+                    .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string()),
+            };
+
+            let duplicate_meta: Vec<DuplicateMeta> = metas_sorted
+                .iter()
+                .map(|m| DuplicateMeta {
+                    path: m.path.clone(),
+                    size_bytes: m.size,
+                    modified: m
+                        .mtime
+                        .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string()),
+                })
+                .collect();
+
             duplicates.push(DuplicateFile {
                 original: keep.path,
-                duplicates: metas_sorted.into_iter().map(|m| m.path).collect(),
+                duplicates: duplicate_meta.iter().map(|m| m.path.clone()).collect(),
                 content_hash: format!("{:x}", hash),
                 size_bytes: size,
                 kept_mtime,
+                original_meta,
+                duplicate_meta,
             });
         }
     }

@@ -3,6 +3,7 @@ import { tauriService } from "./services/tauri";
 import { useTheme } from "./hooks/useTauri";
 import { open } from "@tauri-apps/plugin-dialog";
 import { GitAssistant } from "./components/GitAssistant";
+import { NautiClippy } from "./components/NautiClippy";
 import { useFileWatcher } from "./hooks/useFileWatcher";
 import { useNotifications } from "./components/notifications/NotificationProvider";
 import Modal from "./components/Modal";
@@ -24,7 +25,7 @@ const FILE_TYPE_PRESETS = {
 };
 
 type OperationStatus = "idle" | "running" | "complete" | "error";
-type ActiveSection = "status" | "scan" | "embed" | "cluster" | "search" | "timeline" | "git";
+type ActiveSection = "status" | "scan" | "embed" | "cluster" | "search" | "timeline" | "git" | "nauti";
 
 interface ScanResult {
     files_scanned: number;
@@ -74,8 +75,9 @@ export default function App() {
     const [embedBatchSize, setEmbedBatchSize] = useState<number | undefined>(undefined);
 
     // Embedding provider config state
-    const [embeddingProvider, setEmbeddingProvider] = useState<"local" | "azure" | "gcp" | "multi">("local");
+    const [embeddingProvider, setEmbeddingProvider] = useState<"local" | "llama" | "azure" | "gcp" | "multi">("local");
     const [localModel, setLocalModel] = useState("BAAI/bge-small-en-v1.5");
+    const [localEndpoint, setLocalEndpoint] = useState("http://127.0.0.1:8080");
     
     // Azure state
     const [azureConfigured, setAzureConfigured] = useState(false);
@@ -180,10 +182,13 @@ export default function App() {
         try {
             const provider = await tauriService.loadProviderConfig(dir);
             if (provider.provider) {
-                setEmbeddingProvider(provider.provider);
+                setEmbeddingProvider(provider.provider as any);
             }
             if (provider.local_model) {
                 setLocalModel(provider.local_model);
+            }
+            if (provider.local_endpoint) {
+                setLocalEndpoint(provider.local_endpoint);
             }
             if (provider.provider === "azure") {
                 await loadAzureConfig(dir);
@@ -329,7 +334,7 @@ export default function App() {
 
         if (embeddingProvider === "local") {
             try {
-                await tauriService.saveProviderConfig(indexPath, "local", localModel || undefined);
+                await tauriService.saveProviderConfig(indexPath, "local", localModel || undefined, localEndpoint || undefined);
                 setErrorMsg("");
             } catch (error: any) {
                 setErrorMsg(error.toString());
@@ -370,7 +375,7 @@ export default function App() {
                     useGcpAdc ? "" : gcpServiceAccountPath,
                     gcpEndpoint || undefined
                 );
-                await tauriService.saveProviderConfig(indexPath, "gcp", localModel || undefined);
+                await tauriService.saveProviderConfig(indexPath, "gcp", localModel || undefined, undefined);
                 await loadProviderConfig(indexPath); // refresh state to confirm persistence
                 setHasExistingGcpKey(!useGcpAdc && !!gcpServiceAccountPath);
                 setGcpConfigured(true);
@@ -404,7 +409,7 @@ export default function App() {
                     azureDeployment,
                     azureApiVersion || undefined
                 );
-                await tauriService.saveProviderConfig(indexPath, "azure", localModel || undefined);
+                await tauriService.saveProviderConfig(indexPath, "azure", localModel || undefined, undefined);
                 setAzureConfigured(true);
                 setShowAzureConfig(false);
                 setErrorMsg("");
@@ -437,7 +442,7 @@ export default function App() {
                 azureDeployment,
                 azureApiVersion || undefined
             );
-            await tauriService.saveProviderConfig(indexPath, "azure", localModel || undefined);
+            await tauriService.saveProviderConfig(indexPath, "azure", localModel || undefined, undefined);
             setAzureEndpoint(validationSuggested);
             setAzureConfigured(true);
             setShowAzureConfig(false);
@@ -480,16 +485,9 @@ export default function App() {
         }
 
         // Persist current provider choice so the backend doesn't fall back to Azure/local defaults
-        try {
-            await tauriService.saveProviderConfig(indexPath, embeddingProvider, localModel || undefined);
-        } catch (e: any) {
-            setErrorMsg(e.toString());
-            return;
-        }
-
-        if (embeddingProvider === "local") {
+        if (embeddingProvider !== "multi") {
             try {
-                await tauriService.saveProviderConfig(indexPath, "local", localModel || undefined);
+                await tauriService.saveProviderConfig(indexPath, embeddingProvider, localModel || undefined, localEndpoint || undefined);
             } catch (e: any) {
                 setErrorMsg(e.toString());
                 return;
@@ -608,6 +606,7 @@ export default function App() {
         { id: "search", icon: "🔍", label: "Search" },
         { id: "timeline", icon: "📅", label: "Timeline" },
         { id: "git", icon: "📎", label: "Git Clippy" },
+        { id: "nauti", icon: "🧭", label: "Nauti-Clippy" },
     ];
 
     return (
@@ -899,11 +898,13 @@ export default function App() {
                                         <h3>🧩 Embedding Provider</h3>
                                         <span className={`config-status ${
                                             (embeddingProvider === "local") || 
+                                            (embeddingProvider === "llama") ||
                                             (embeddingProvider === "azure" && azureConfigured) || 
                                             (embeddingProvider === "gcp" && gcpConfigured) 
                                             ? "configured" : "not-configured"
                                         }`}>
                                             {(embeddingProvider === "local") || 
+                                            (embeddingProvider === "llama") ||
                                             (embeddingProvider === "azure" && azureConfigured) || 
                                             (embeddingProvider === "gcp" && gcpConfigured) 
                                             ? "✓ Configured" : "⚠ Not Configured"}
@@ -926,10 +927,11 @@ export default function App() {
                                             <select
                                                 value={embeddingProvider}
                                                 onChange={(e) => {
-                                                    const value = e.target.value as "local" | "azure" | "gcp";
+                                                    const value = e.target.value as any;
                                                     setEmbeddingProvider(value);
-                                                    if (value === "local") {
-                                                        setAzureConfigured(true); // Local is always ready
+                                                    if (value === "local" || value === "llama") {
+                                                        setAzureConfigured(true);
+                                                        setGcpConfigured(true);
                                                         setErrorMsg("");
                                                     } else if (value === "azure") {
                                                         if (indexPath) loadAzureConfig(indexPath);
@@ -942,20 +944,22 @@ export default function App() {
                                                     }
                                                 }}
                                             >
-                                                <option value="local">Local (Built-in)</option>
+                                                <option value="local">Local (Deterministic CPU)</option>
+                                                <option value="llama">Local llama.cpp (GPU/CPU)</option>
                                                 <option value="azure">Azure OpenAI</option>
                                                 <option value="gcp">Google Cloud Vertex AI</option>
                                                 <option value="multi">Multi-Provider (GCP → Azure → Local)</option>
                                             </select>
                                             <small>
-                                                {embeddingProvider === "local" && "Runs offline and free."}
+                                                {embeddingProvider === "local" && "Runs offline (deterministic, CPU)."}
+                                                {embeddingProvider === "llama" && "Uses your local llama.cpp server (GPU/CPU)."}
                                                 {embeddingProvider === "azure" && "Uses Azure OpenAI API."}
                                                 {embeddingProvider === "gcp" && "Uses Google Vertex AI API."}
                                                 {embeddingProvider === "multi" && "Tries GCP, then Azure, then local — always gets an embedding."}
                                             </small>
                                         </div>
 
-                                        {embeddingProvider === "local" && (
+                                        {(embeddingProvider === "local" || embeddingProvider === "llama") && (
                                             <div className="form-group">
                                                 <label>Local Model:</label>
                                                 <input
@@ -964,7 +968,20 @@ export default function App() {
                                                     value={localModel}
                                                     onChange={(e) => setLocalModel(e.target.value)}
                                                 />
-                                                <small>Suggested: BAAI/bge-small-en-v1.5 or all-MiniLM-L6-v2</small>
+                                                <small>For llama: e.g., embedding-gemma; for deterministic: BAAI/bge-small-en-v1.5</small>
+                                            </div>
+                                        )}
+
+                                        {embeddingProvider === "llama" && (
+                                            <div className="form-group">
+                                                <label>Local Endpoint (llama.cpp server):</label>
+                                                <input
+                                                    type="text"
+                                                    placeholder="http://127.0.0.1:8080"
+                                                    value={localEndpoint}
+                                                    onChange={(e) => setLocalEndpoint(e.target.value)}
+                                                />
+                                                <small>Run llama.cpp server with your Qwen/Gemma models and point here.</small>
                                             </div>
                                         )}
 
@@ -1531,6 +1548,14 @@ export default function App() {
                         </div>
 
                         <GitAssistant repoPath={gitRepoPath} indexPath={indexPath} />
+                    </section>
+                )}
+
+                {activeSection === "nauti" && (
+                    <section className="content-section">
+                        <h2>🧭 Nauti-Clippy</h2>
+                        <p className="section-desc">Watch non-git folders (e.g., Documents, Downloads, Pictures) for duplicates and copy/backup clutter.</p>
+                        <NautiClippy defaultPaths={scanPath ? [scanPath] : []} />
                     </section>
                 )}
             </main>
