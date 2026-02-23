@@ -68,6 +68,7 @@ export default function App() {
     // Embed state
     const [embedStatus, setEmbedStatus] = useState<OperationStatus>("idle");
     const [embedProgress, setEmbedProgress] = useState(0);
+    const [embedProgressDetail, setEmbedProgressDetail] = useState<{ processed: number; total: number; status: string } | null>(null);
     const [embedResult, setEmbedResult] = useState<any>(null);
     const [embedMaxFiles, setEmbedMaxFiles] = useState<number | undefined>(undefined);
     const [embedBatchSize, setEmbedBatchSize] = useState<number | undefined>(undefined);
@@ -114,7 +115,7 @@ export default function App() {
     // File watcher integration (notifications)
     // Using hooks and notification provider to surface file events
     const [watchAll, setWatchAll] = useState(false);
-    const { active: watcherActive, events: watcherEvents } = useFileWatcher({ indexPath, watchAll });
+    const { active: watcherActive, events: watcherEvents, startWatcher, stopWatcher } = useFileWatcher({ indexPath, watchAll });
     const { notify } = useNotifications();
 
     // Show toast for new watcher events
@@ -497,6 +498,7 @@ export default function App() {
 
         setEmbedStatus("running");
         setEmbedProgress(0);
+        setEmbedProgressDetail(null);
         setErrorMsg("");
         setEmbedResult(null);
 
@@ -509,9 +511,11 @@ export default function App() {
                     if (p && p.total_files > 0) {
                         const percent = Math.round((p.processed_files / Math.max(1, p.total_files)) * 100);
                         setEmbedProgress(percent);
+                        setEmbedProgressDetail({ processed: p.processed_files, total: p.total_files, status: p.status || "running" });
                         if (p.status == "complete") {
                             // finalize
                             setEmbedProgress(100);
+                            setEmbedProgressDetail({ processed: p.total_files, total: p.total_files, status: "complete" });
                             setEmbedStatus("complete");
                             clearInterval(pollHandle);
                         }
@@ -525,6 +529,7 @@ export default function App() {
             console.log("Embed result:", result);
             setEmbedResult(result);
             setEmbedProgress(100);
+            setEmbedProgressDetail(prev => prev ? { ...prev, processed: prev.total, status: "complete" } : { processed: 1, total: 1, status: "complete" });
             setEmbedStatus("complete");
             loadStats();
         } catch (error: any) {
@@ -742,6 +747,14 @@ export default function App() {
                                         <small style={{ display: 'block', marginTop: '4px', color: 'var(--text-secondary)' }}>
                                             Uses default user folders (Desktop/Documents/Downloads). Uncheck to watch only the current index folder.
                                         </small>
+                                        <div style={{ marginTop: '8px', display: 'flex', gap: '0.5rem' }}>
+                                            <button className="btn btn-secondary btn-small" onClick={() => startWatcher()} disabled={watcherActive}>
+                                                ▶ Start watcher
+                                            </button>
+                                            <button className="btn btn-secondary btn-small" onClick={() => stopWatcher()} disabled={!watcherActive}>
+                                                ⏹ Stop watcher
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -1087,6 +1100,20 @@ export default function App() {
                                     </div>
                                 </div>
 
+                                {embedStatus === "running" && (
+                                    <div className="progress-section" style={{ marginTop: '1rem' }}>
+                                        <div className="progress-bar">
+                                            <div className="progress-fill" style={{ width: `${Math.min(100, embedProgress)}%` }} />
+                                        </div>
+                                        <p style={{ marginTop: '0.5rem', color: 'var(--text-secondary)' }}>
+                                            Processing... {embedProgress}%
+                                            {embedProgressDetail && embedProgressDetail.total > 0 && (
+                                                <span> ({embedProgressDetail.processed}/{embedProgressDetail.total} files)</span>
+                                            )}
+                                        </p>
+                                    </div>
+                                )}
+
                                 <div className="action-row">
                                     <button
                                         className="btn btn-primary btn-large"
@@ -1202,6 +1229,100 @@ export default function App() {
                                             </div>
                                         </div>
                                     )}
+                            </>
+                        )}
+                    </section>
+                )}
+
+                {/* Cluster Section */}
+                {activeSection === "cluster" && (
+                    <section className="content-section">
+                        <h2>🗂️ Clusters</h2>
+                        <p className="section-desc">Group files by similarity using your existing embeddings.</p>
+
+                        {!indexPath ? (
+                            <div className="empty-state">
+                                <p>No index available. Please scan a folder first.</p>
+                                <button className="btn btn-primary" onClick={() => setActiveSection("scan")}>
+                                    📁 Start Scanning
+                                </button>
+                            </div>
+                        ) : (
+                            <>
+                                <div className="form-group">
+                                    <label>Number of clusters (optional):</label>
+                                    <input
+                                        type="number"
+                                        placeholder="Auto (sqrt of file count)"
+                                        value={numClusters ?? ""}
+                                        onChange={(e) => setNumClusters(e.target.value ? parseInt(e.target.value) : undefined)}
+                                        style={{ maxWidth: "240px" }}
+                                    />
+                                </div>
+
+                                <div className="action-row" style={{ gap: "0.75rem" }}>
+                                    <button
+                                        className="btn btn-primary"
+                                        onClick={handleCluster}
+                                        disabled={clusterStatus === "running"}
+                                    >
+                                        {clusterStatus === "running" ? "🔄 Clustering..." : "🔗 Create Clusters"}
+                                    </button>
+                                    <button
+                                        className="btn btn-secondary"
+                                        onClick={async () => {
+                                            try {
+                                                const data = await tauriService.getClustersSummary(indexPath);
+                                                setClusters(data.clusters || []);
+                                                setErrorMsg("");
+                                            } catch (e: any) {
+                                                setErrorMsg(e.toString());
+                                            }
+                                        }}
+                                        disabled={clusterStatus === "running"}
+                                    >
+                                        ↻ Refresh Clusters
+                                    </button>
+                                </div>
+
+                                {clusterStatus === "error" && errorMsg && (
+                                    <div className="error-message" style={{ marginTop: "1rem" }}>
+                                        <p>{errorMsg}</p>
+                                    </div>
+                                )}
+
+                                {clusters.length === 0 ? (
+                                    <p className="no-results" style={{ marginTop: "1.5rem" }}>
+                                        No clusters yet. Generate embeddings first, then create clusters.
+                                    </p>
+                                ) : (
+                                    <div className="clusters-list" style={{ marginTop: "1.5rem" }}>
+                                        <h4>Clusters ({clusters.length})</h4>
+                                        {clusters.map((cluster: any) => {
+                                            const size = cluster.file_count || cluster.files?.length || cluster.size || 0;
+                                            const files = cluster.files || cluster.sample_files || [];
+                                            return (
+                                                <div key={cluster.id} className="cluster-item" style={{ border: "1px solid var(--border-color)", padding: "1rem", borderRadius: "var(--radius-md)", marginTop: "0.5rem" }}>
+                                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                                        <span className="cluster-title">{cluster.label || `Cluster ${cluster.id}`}</span>
+                                                        <span className="cluster-size">{size} files</span>
+                                                    </div>
+                                                    {cluster.summary && (
+                                                        <p style={{ color: "var(--text-secondary)", marginTop: "0.5rem" }}>{cluster.summary}</p>
+                                                    )}
+                                                    {files.length > 0 && (
+                                                        <ul style={{ marginTop: "0.5rem", color: "var(--text-secondary)" }}>
+                                                            {files.slice(0, 5).map((f: any, i: number) => (
+                                                                <li key={i}>{f.name || f.path || f}</li>
+                                                            ))}
+                                                            {files.length > 5 && <li>...and {files.length - 5} more</li>}
+                                                        </ul>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
                             </>
                         )}
                     </section>

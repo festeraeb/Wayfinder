@@ -306,6 +306,11 @@ pub async fn scan_directory(path: String, index_dir: String, extensions: Option<
         .filter_map(|e| e.ok())
     {
         let file_path = entry.path();
+
+        // Skip node_modules and other heavy dependency folders
+        if file_path.to_string_lossy().to_lowercase().contains("node_modules") {
+            continue;
+        }
         
         // Skip hidden files and directories
         if file_path.file_name()
@@ -669,8 +674,10 @@ pub async fn generate_embeddings_azure(index_dir: String, max_files: Option<usiz
                 continue;
             }
             let content_hash = format!("{:x}", md5_hash(&content));
-            let truncated_content = if content.len() > 32000 {
-                content[..32000].to_string()
+            // Trim content to a safe size to avoid exceeding embedding model context limits
+            let max_chars = 8000usize;
+            let truncated_content = if content.len() > max_chars {
+                content[..max_chars].to_string()
             } else {
                 content.clone()
             };
@@ -813,6 +820,7 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
     let index_file = index_path.join("index.json");
     let config_file = index_path.join("gcp_config.json");
     let embeddings_file = index_path.join("embeddings.json");
+    let progress_file = index_path.join("embedding_progress.json");
 
     if !config_file.exists() {
         return Err("GCP config not found. Please configure GCP settings first.".to_string());
@@ -832,32 +840,72 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
         index_data.files
     };
 
-    if config.service_account_path.trim().is_empty() {
-        return Err("GCP service account JSON path is required".to_string());
-    }
+    // Resolve credentials: prefer explicit service account JSON, otherwise try ADC.
+    let bearer = if !config.service_account_path.trim().is_empty() {
+        let sa_path = Path::new(&config.service_account_path);
+        if !sa_path.exists() {
+            return Err(format!("Service account file not found: {}", config.service_account_path));
+        }
 
-    let sa_path = Path::new(&config.service_account_path);
-    if !sa_path.exists() {
-        return Err(format!("Service account file not found: {}", config.service_account_path));
-    }
-
-    // Build an access token using the service account
-    let scopes = &["https://www.googleapis.com/auth/cloud-platform"];
-    let key = yup_oauth2::read_service_account_key(sa_path)
-        .await
-        .map_err(|e| format!("Failed to read service account key: {}", e))?;
-    let auth = yup_oauth2::ServiceAccountAuthenticator::builder(key)
-        .build()
-        .await
-        .map_err(|e| format!("Failed to build GCP authenticator: {}", e))?;
-    let token = auth
-        .token(scopes)
-        .await
-        .map_err(|e| format!("Failed to fetch GCP token: {}", e))?;
-    let bearer = token
-        .token()
-        .ok_or_else(|| "GCP token missing access token".to_string())?
-        .to_string();
+        // Build an access token using the service account
+        let scopes = &["https://www.googleapis.com/auth/cloud-platform"];
+        let key = yup_oauth2::read_service_account_key(sa_path)
+            .await
+            .map_err(|e| format!("Failed to read service account key: {}", e))?;
+        let auth = yup_oauth2::ServiceAccountAuthenticator::builder(key)
+            .build()
+            .await
+            .map_err(|e| format!("Failed to build GCP authenticator: {}", e))?;
+        let token = auth
+            .token(scopes)
+            .await
+            .map_err(|e| format!("Failed to fetch GCP token: {}", e))?;
+        token
+            .token()
+            .ok_or_else(|| "GCP token missing access token".to_string())?
+            .to_string()
+    } else {
+        // Try GOOGLE_APPLICATION_CREDENTIALS env first
+        if let Ok(env_path) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+            let p = Path::new(&env_path);
+            if p.exists() {
+                let scopes = &["https://www.googleapis.com/auth/cloud-platform"];
+                let key = yup_oauth2::read_service_account_key(p)
+                    .await
+                    .map_err(|e| format!("Failed to read service account key from GOOGLE_APPLICATION_CREDENTIALS: {}", e))?;
+                let auth = yup_oauth2::ServiceAccountAuthenticator::builder(key)
+                    .build()
+                    .await
+                    .map_err(|e| format!("Failed to build GCP authenticator: {}", e))?;
+                let token = auth
+                    .token(scopes)
+                    .await
+                    .map_err(|e| format!("Failed to fetch GCP token: {}", e))?;
+                token
+                    .token()
+                    .ok_or_else(|| "GCP token missing access token".to_string())?
+                    .to_string()
+            } else {
+                return Err(format!("GOOGLE_APPLICATION_CREDENTIALS file not found: {}", env_path));
+            }
+        } else {
+            // Fall back to gcloud ADC command to print an access token
+            match std::process::Command::new("gcloud").args(&["auth", "application-default", "print-access-token"]).output() {
+                Ok(out) => {
+                    if out.status.success() {
+                        let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if tok.is_empty() {
+                            return Err("gcloud returned empty ADC access token".to_string());
+                        }
+                        tok
+                    } else {
+                        return Err(format!("gcloud failed: {}", String::from_utf8_lossy(&out.stderr)));
+                    }
+                }
+                Err(e) => return Err(format!("Failed to run gcloud for ADC token: {}", e)),
+            }
+        }
+    };
 
     let client = reqwest::Client::new();
     let url = config.endpoint.unwrap_or_else(|| format!(
@@ -865,8 +913,26 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
         config.location, config.project_id, config.location, config.model_id
     ));
 
+    let is_gemini_embedding = config.model_id.to_lowercase().contains("gemini-embedding");
+
     let mut embeddings: Vec<FileEmbedding> = Vec::new();
     let mut generated_count = 0;
+    let mut error_count = 0;
+    let total_files = files_to_process.len();
+
+    let mut progress = BatchProgress {
+        batch_id: format!("{}", Local::now().timestamp()),
+        total_files,
+        processed_files: 0,
+        current_batch: 0,
+        total_batches: 1,
+        batch_size: total_files.max(1),
+        status: "running".to_string(),
+        started_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        last_updated: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        errors: Vec::new(),
+    };
+    let _ = fs::write(&progress_file, serde_json::to_string_pretty(&progress).unwrap_or_default());
 
     for file in files_to_process {
         let content = match fs::read_to_string(&file.path) {
@@ -877,21 +943,41 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
             continue;
         }
 
-        let content_hash = format!("{:x}", md5_hash(&content));
+        // Trim to avoid context issues
+        let truncated_content = if content.len() > 8000 { content[..8000].to_string() } else { content.clone() };
+
+        let content_hash = format!("{:x}", md5_hash(&truncated_content));
+
+        let payload = if is_gemini_embedding {
+            // Gemini embedding endpoint expects a simple string content inside instances
+            serde_json::json!({
+                "instances": [{ "content": truncated_content }]
+            })
+        } else {
+            serde_json::json!({
+                "instances": [{ "content": truncated_content }]
+            })
+        };
 
         let response = client
             .post(&url)
             .bearer_auth(&bearer)
-            .json(&serde_json::json!({
-                "instances": [{ "content": content }]
-            }))
+            .json(&payload)
             .send()
             .await
             .map_err(|e| format!("GCP request failed: {}", e))?;
 
         if response.status().is_success() {
             let json: serde_json::Value = response.json().await.map_err(|e| format!("Failed to parse GCP response: {}", e))?;
-            if let Some(embedding_values) = json["predictions"][0]["embedding"]["values"].as_array() {
+            let maybe_emb = if is_gemini_embedding {
+                json["predictions"][0]["values"].as_array()
+                    .or_else(|| json["predictions"][0]["embeddings"]["values"].as_array())
+            } else {
+                json["predictions"][0]["embedding"]["values"].as_array()
+                    .or_else(|| json["predictions"][0]["embedding"].as_array())
+            };
+
+            if let Some(embedding_values) = maybe_emb {
                 let emb_vec: Vec<f32> = embedding_values.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
                 embeddings.push(FileEmbedding {
                     path: file.path.clone(),
@@ -899,12 +985,22 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
                     content_hash,
                 });
                 generated_count += 1;
+            } else {
+                let err_text = json.to_string();
+                log_error(index_path, "gcp_api_error", Some(&file.path), &format!("Missing embedding in response: {}", err_text), None);
+                error_count += 1;
             }
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             log_error(index_path, "gcp_api_error", Some(&file.path), &text, Some(&status.to_string()));
+            error_count += 1;
         }
+
+        // update progress per file
+        progress.processed_files += 1;
+        progress.last_updated = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let _ = fs::write(&progress_file, serde_json::to_string_pretty(&progress).unwrap_or_default());
     }
 
     let final_data = EmbeddingsData {
@@ -916,10 +1012,16 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
     let json = serde_json::to_string_pretty(&final_data).map_err(|e| format!("Failed to serialize embeddings: {}", e))?;
     fs::write(&embeddings_file, json).map_err(|e| format!("Failed to write embeddings file: {}", e))?;
 
+    progress.status = "complete".to_string();
+    progress.processed_files = total_files;
+    progress.last_updated = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let _ = fs::write(&progress_file, serde_json::to_string_pretty(&progress).unwrap_or_default());
+
     Ok(serde_json::json!({
         "embeddings_generated": generated_count,
         "cached_count": 0,
-        "message": format!("Generated {} embeddings using GCP.", generated_count)
+        "error_count": error_count,
+        "message": format!("Generated {} embeddings using GCP ({} errors).", generated_count, error_count)
     }))
 }
 
