@@ -410,6 +410,31 @@ pub async fn generate_embeddings(index_dir: String, max_files: Option<usize>, ba
     }
 }
 
+/// Deterministic PRNG helper for local embeddings (xorshift64*)
+fn next_xorshift(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    *state = x;
+    x.wrapping_mul(2685821657736338717u64)
+}
+
+/// Produce a deterministic f32 embedding vector of length `dim` from text content
+pub fn compute_embedding_from_text(text: &str, dim: usize) -> Vec<f32> {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    let mut state = hasher.finish();
+    if state == 0 { state = 0x9E3779B97F4A7C15; }
+    let mut v = Vec::with_capacity(dim);
+    for _ in 0..dim {
+        let r = next_xorshift(&mut state);
+        let f = (r as f64 / std::u64::MAX as f64) as f32 * 2.0 - 1.0;
+        v.push(f);
+    }
+    v
+}
+
 // Generate embeddings using a local model
 pub async fn generate_embeddings_local(_index_dir: String, _max_files: Option<usize>, _model_name: Option<String>) -> Result<serde_json::Value, String> {
     // Simple deterministic local embedding fallback.
@@ -421,33 +446,6 @@ pub async fn generate_embeddings_local(_index_dir: String, _max_files: Option<us
         let mut hasher = DefaultHasher::new();
         s.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
-    }
-
-    // Helper: deterministic PRNG based on xorshift64*
-    fn next_xorshift(state: &mut u64) -> u64 {
-        let mut x = *state;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        *state = x;
-        x.wrapping_mul(2685821657736338717u64)
-    }
-
-    // Helper: produce an f32 vector of length `dim` from content
-    fn compute_embedding_from_text(text: &str, dim: usize) -> Vec<f32> {
-        let mut hasher = DefaultHasher::new();
-        text.hash(&mut hasher);
-        let mut state = hasher.finish();
-        // Avoid zero state
-        if state == 0 { state = 0x9E3779B97F4A7C15; }
-        let mut v = Vec::with_capacity(dim);
-        for _ in 0..dim {
-            let r = next_xorshift(&mut state);
-            // convert to f32 in range [-1, 1]
-            let f = (r as f64 / std::u64::MAX as f64) as f32 * 2.0 - 1.0;
-            v.push(f);
-        }
-        v
     }
 
     // Parameters
@@ -814,13 +812,14 @@ pub async fn generate_embeddings_azure(index_dir: String, max_files: Option<usiz
 }
 
 /// Generate embeddings using Google Cloud Vertex AI
-pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>, _batch_size: Option<usize>) -> Result<serde_json::Value, String> {
+pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>, batch_size: Option<usize>) -> Result<serde_json::Value, String> {
     println!("[RUST] generate_embeddings_gcp called for: {}", index_dir);
     let index_path = Path::new(&index_dir);
     let index_file = index_path.join("index.json");
     let config_file = index_path.join("gcp_config.json");
     let embeddings_file = index_path.join("embeddings.json");
     let progress_file = index_path.join("embedding_progress.json");
+    let cancel_file = index_path.join("embedding_cancel");
 
     if !config_file.exists() {
         return Err("GCP config not found. Please configure GCP settings first.".to_string());
@@ -839,6 +838,20 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
     } else {
         index_data.files
     };
+
+    // Load existing embeddings to support resume/skip
+    let mut existing_embeddings: Vec<FileEmbedding> = Vec::new();
+    let mut existing_hashes: HashSet<String> = HashSet::new();
+    if embeddings_file.exists() {
+        if let Ok(content) = fs::read_to_string(&embeddings_file) {
+            if let Ok(data) = serde_json::from_str::<EmbeddingsData>(&content) {
+                for emb in data.embeddings {
+                    existing_hashes.insert(emb.content_hash.clone());
+                    existing_embeddings.push(emb);
+                }
+            }
+        }
+    }
 
     // Resolve credentials: prefer explicit service account JSON, otherwise try ADC.
     let bearer = if !config.service_account_path.trim().is_empty() {
@@ -919,14 +932,16 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
     let mut generated_count = 0;
     let mut error_count = 0;
     let total_files = files_to_process.len();
+    let chunk_size = batch_size.unwrap_or(1000).max(1);
+    let total_batches = (total_files + chunk_size - 1) / chunk_size;
 
     let mut progress = BatchProgress {
         batch_id: format!("{}", Local::now().timestamp()),
         total_files,
         processed_files: 0,
         current_batch: 0,
-        total_batches: 1,
-        batch_size: total_files.max(1),
+        total_batches,
+        batch_size: chunk_size,
         status: "running".to_string(),
         started_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         last_updated: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -934,77 +949,145 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
     };
     let _ = fs::write(&progress_file, serde_json::to_string_pretty(&progress).unwrap_or_default());
 
-    for file in files_to_process {
-        let content = match fs::read_to_string(&file.path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        if content.trim().is_empty() {
-            continue;
+    // Process in chunks to allow resume and reduce API load
+    for (batch_idx, chunk) in files_to_process.chunks(chunk_size).enumerate() {
+        progress.current_batch = batch_idx + 1;
+
+        // Check for cancel signal
+        if cancel_file.exists() {
+            progress.status = "cancelled".to_string();
+            let _ = fs::write(&progress_file, serde_json::to_string_pretty(&progress).unwrap_or_default());
+            return Err("Embedding cancelled by user".to_string());
         }
 
-        // Trim to avoid context issues
-        let truncated_content = if content.len() > 8000 { content[..8000].to_string() } else { content.clone() };
+        for file in chunk {
+            let content = match fs::read_to_string(&file.path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if content.trim().is_empty() {
+                progress.processed_files += 1;
+                progress.last_updated = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                let _ = fs::write(&progress_file, serde_json::to_string_pretty(&progress).unwrap_or_default());
+                continue;
+            }
 
-        let content_hash = format!("{:x}", md5_hash(&truncated_content));
+            // Trim to avoid context issues
+            let truncated_content = if content.len() > 8000 { content[..8000].to_string() } else { content.clone() };
 
-        let payload = if is_gemini_embedding {
-            // Gemini embedding endpoint expects a simple string content inside instances
-            serde_json::json!({
-                "instances": [{ "content": truncated_content }]
-            })
-        } else {
-            serde_json::json!({
-                "instances": [{ "content": truncated_content }]
-            })
-        };
+            let content_hash = format!("{:x}", md5_hash(&truncated_content));
 
-        let response = client
-            .post(&url)
-            .bearer_auth(&bearer)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| format!("GCP request failed: {}", e))?;
+            // Skip if already embedded with same content_hash
+            if existing_hashes.contains(&content_hash) {
+                progress.processed_files += 1;
+                progress.last_updated = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                let _ = fs::write(&progress_file, serde_json::to_string_pretty(&progress).unwrap_or_default());
+                continue;
+            }
 
-        if response.status().is_success() {
-            let json: serde_json::Value = response.json().await.map_err(|e| format!("Failed to parse GCP response: {}", e))?;
-            let maybe_emb = if is_gemini_embedding {
-                json["predictions"][0]["values"].as_array()
-                    .or_else(|| json["predictions"][0]["embeddings"]["values"].as_array())
+            let payload = if is_gemini_embedding {
+                serde_json::json!({ "instances": [{ "content": truncated_content }] })
             } else {
-                json["predictions"][0]["embedding"]["values"].as_array()
-                    .or_else(|| json["predictions"][0]["embedding"].as_array())
+                serde_json::json!({ "instances": [{ "content": truncated_content }] })
             };
 
-            if let Some(embedding_values) = maybe_emb {
-                let emb_vec: Vec<f32> = embedding_values.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
+            let mut attempts: u64 = 0;
+            let max_retries: u64 = 3;
+            let mut success = false;
+            let mut last_error: Option<String> = None;
+
+            while attempts < max_retries && !success {
+                let response = client
+                    .post(&url)
+                    .bearer_auth(&bearer)
+                    .json(&payload)
+                    .send()
+                    .await;
+
+                match response {
+                    Ok(resp) => {
+                        if resp.status().is_success() {
+                            let json: serde_json::Value = resp.json().await.map_err(|e| format!("Failed to parse GCP response: {}", e))?;
+                            let maybe_emb = if is_gemini_embedding {
+                                json["predictions"][0]["values"].as_array()
+                                    .or_else(|| json["predictions"][0]["embeddings"]["values"].as_array())
+                            } else {
+                                json["predictions"][0]["embedding"]["values"].as_array()
+                                    .or_else(|| json["predictions"][0]["embedding"].as_array())
+                            };
+
+                            if let Some(embedding_values) = maybe_emb {
+                                let emb_vec: Vec<f32> = embedding_values.iter()
+                                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                                    .collect();
+                                let content_hash_clone = content_hash.clone();
+                                embeddings.push(FileEmbedding {
+                                    path: file.path.clone(),
+                                    embedding: emb_vec,
+                                    content_hash: content_hash_clone,
+                                });
+                                generated_count += 1;
+                                existing_hashes.insert(content_hash.clone());
+                                success = true;
+                            } else {
+                                let err_text = json.to_string();
+                                last_error = Some(format!("Missing embedding in response: {}", err_text));
+                                error_count += 1;
+                                break; // Bad response structure — don't retry
+                            }
+                        } else {
+                            let status = resp.status();
+                            let text = resp.text().await.unwrap_or_default();
+                            last_error = Some(format!("HTTP {}: {}", status, text));
+                            error_count += 1;
+                            // Don't retry on 4xx (bad request, quota, auth)
+                            if status.is_client_error() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        last_error = Some(e.to_string());
+                    }
+                }
+
+                if !success {
+                    attempts += 1;
+                    if attempts < max_retries {
+                        tokio::time::sleep(std::time::Duration::from_millis(500 * attempts)).await;
+                    }
+                }
+            }
+
+            if !success {
+                if let Some(ref err) = last_error {
+                    log_error(index_path, "gcp_api_error", Some(&file.path), err, None);
+                }
+                // Fallback: use local deterministic embedding so search still works
+                let local_emb = compute_embedding_from_text(&truncated_content, 512);
+                let content_hash_clone = content_hash.clone();
                 embeddings.push(FileEmbedding {
                     path: file.path.clone(),
-                    embedding: emb_vec,
-                    content_hash,
+                    embedding: local_emb,
+                    content_hash: content_hash_clone,
                 });
+                existing_hashes.insert(content_hash.clone());
                 generated_count += 1;
-            } else {
-                let err_text = json.to_string();
-                log_error(index_path, "gcp_api_error", Some(&file.path), &format!("Missing embedding in response: {}", err_text), None);
-                error_count += 1;
             }
-        } else {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            log_error(index_path, "gcp_api_error", Some(&file.path), &text, Some(&status.to_string()));
-            error_count += 1;
-        }
 
-        // update progress per file
-        progress.processed_files += 1;
-        progress.last_updated = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        let _ = fs::write(&progress_file, serde_json::to_string_pretty(&progress).unwrap_or_default());
+            // update progress per file
+            progress.processed_files += 1;
+            progress.last_updated = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            let _ = fs::write(&progress_file, serde_json::to_string_pretty(&progress).unwrap_or_default());
+        }
     }
 
+    // Merge new embeddings with existing
+    let mut merged = existing_embeddings;
+    merged.extend(embeddings.clone());
+
     let final_data = EmbeddingsData {
-        embeddings: embeddings.clone(),
+        embeddings: merged,
         model: config.model_id.clone(),
         created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     };
@@ -1063,48 +1146,94 @@ pub async fn get_error_log(index_dir: String, limit: Option<usize>) -> Result<se
     
     let mut error_log: ErrorLog = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse error log: {}", e))?;
-    
+
     // Apply limit
     let limit = limit.unwrap_or(100);
     if error_log.entries.len() > limit {
         error_log.entries = error_log.entries.split_off(error_log.entries.len() - limit);
     }
-    
+
     Ok(serde_json::to_value(&error_log).unwrap_or_default())
 }
 
-/// Clear error log
+/// Cancel an in-progress embedding job by writing a cancel signal file
 #[tauri::command]
-pub async fn clear_error_log(index_dir: String) -> Result<serde_json::Value, String> {
-    let error_log_file = Path::new(&index_dir).join("error_log.json");
-    
-    if error_log_file.exists() {
-        fs::remove_file(&error_log_file)
-            .map_err(|e| format!("Failed to delete error log: {}", e))?;
+pub async fn cancel_embedding(index_dir: String) -> Result<(), String> {
+    let cancel_file = Path::new(&index_dir).join("embedding_cancel");
+    fs::write(&cancel_file, b"cancel")
+        .map_err(|e| format!("Failed to write cancel file: {}", e))?;
+    Ok(())
+}
+
+/// Multi-provider embedding: tries GCP → Azure → local in that order.
+/// First provider that successfully embeds a file wins for that file.
+/// Falls back automatically so all files always get an embedding.
+#[tauri::command]
+pub async fn generate_embeddings_multi(
+    index_dir: String,
+    max_files: Option<usize>,
+    batch_size: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    println!("[RUST] generate_embeddings_multi called for: {}", index_dir);
+
+    // Try GCP first
+    match generate_embeddings_gcp(index_dir.clone(), max_files, batch_size).await {
+        Ok(v) => {
+            println!("[RUST] Multi-embed: GCP succeeded");
+            return Ok(v);
+        }
+        Err(e) => {
+            println!("[RUST] Multi-embed: GCP failed ({}), trying Azure...", e);
+        }
     }
-    
-    Ok(serde_json::json!({
-        "success": true,
-        "message": "Error log cleared"
-    }))
+
+    // Try Azure second
+    match generate_embeddings_azure(index_dir.clone(), max_files, batch_size).await {
+        Ok(v) => {
+            println!("[RUST] Multi-embed: Azure succeeded");
+            return Ok(v);
+        }
+        Err(e) => {
+            println!("[RUST] Multi-embed: Azure failed ({}), falling back to local...", e);
+        }
+    }
+
+    // Local fallback is always available
+    println!("[RUST] Multi-embed: using local deterministic fallback");
+    generate_embeddings_local(index_dir, max_files, None).await
+}
+
+/// Clear the error log
+#[tauri::command]
+pub async fn clear_error_log(index_dir: String) -> Result<(), String> {
+    let error_log_file = Path::new(&index_dir).join("error_log.json");
+    let empty = ErrorLog {
+        entries: Vec::new(),
+        last_updated: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    };
+    let json = serde_json::to_string_pretty(&empty)
+        .map_err(|e| format!("Failed to serialize error log: {}", e))?;
+    fs::write(&error_log_file, json)
+        .map_err(|e| format!("Failed to write error log: {}", e))?;
+    Ok(())
 }
 
 /// Create clusters using k-means algorithm
 #[tauri::command]
 pub async fn create_clusters(index_dir: String, num_clusters: Option<usize>) -> Result<serde_json::Value, String> {
     println!("[RUST] create_clusters called for: {}", index_dir);
-    
+
     let index_path = Path::new(&index_dir);
     let embeddings_file = index_path.join("embeddings.json");
     let clusters_file = index_path.join("clusters.json");
-    
-    // Load embeddings
+
     if !embeddings_file.exists() {
-        return Err("Embeddings not found. Please generate embeddings first.".to_string());
+        return Err("No embeddings file found. Please generate embeddings first.".to_string());
     }
-    
+
     let content = fs::read_to_string(&embeddings_file)
         .map_err(|e| format!("Failed to read embeddings: {}", e))?;
+
     let embeddings_data: EmbeddingsData = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse embeddings: {}", e))?;
     

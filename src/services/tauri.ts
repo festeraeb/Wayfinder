@@ -11,8 +11,16 @@ export const tauriService = {
         return invoke("generate_embeddings", { indexDir, maxFiles, batchSize });
     },
 
+    async generateEmbeddingsMulti(indexDir: string, maxFiles?: number, batchSize?: number): Promise<Types.EmbedResult> {
+        return invoke("generate_embeddings_multi", { indexDir, maxFiles, batchSize });
+    },
+
     async getEmbeddingProgress(indexDir: string): Promise<Types.BatchProgress> {
         return invoke("get_embedding_progress", { indexDir });
+    },
+
+    async cancelEmbedding(indexDir: string): Promise<void> {
+        return invoke("cancel_embedding", { indexDir });
     },
 
     async createClusters(

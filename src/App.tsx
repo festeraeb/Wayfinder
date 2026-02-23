@@ -74,7 +74,7 @@ export default function App() {
     const [embedBatchSize, setEmbedBatchSize] = useState<number | undefined>(undefined);
 
     // Embedding provider config state
-    const [embeddingProvider, setEmbeddingProvider] = useState<"local" | "azure" | "gcp">("local");
+    const [embeddingProvider, setEmbeddingProvider] = useState<"local" | "azure" | "gcp" | "multi">("local");
     const [localModel, setLocalModel] = useState("BAAI/bge-small-en-v1.5");
     
     // Azure state
@@ -525,7 +525,9 @@ export default function App() {
                 }
             }, 1000);
 
-            const result = await tauriService.generateEmbeddings(indexPath, embedMaxFiles, embedBatchSize);
+            const result = embeddingProvider === "multi"
+                ? await tauriService.generateEmbeddingsMulti(indexPath, embedMaxFiles, embedBatchSize)
+                : await tauriService.generateEmbeddings(indexPath, embedMaxFiles, embedBatchSize);
             console.log("Embed result:", result);
             setEmbedResult(result);
             setEmbedProgress(100);
@@ -537,6 +539,17 @@ export default function App() {
             setErrorMsg(error.toString());
         } finally {
             if (pollHandle) clearInterval(pollHandle);
+        }
+    };
+
+    const handleCancelEmbed = async () => {
+        if (!indexPath) return;
+        try {
+            await tauriService.cancelEmbedding(indexPath);
+            setEmbedStatus("idle");
+            setEmbedProgressDetail(prev => prev ? { ...prev, status: "cancelled" } : null);
+        } catch (e: any) {
+            setErrorMsg("Failed to cancel: " + e.toString());
         }
     };
 
@@ -932,11 +945,13 @@ export default function App() {
                                                 <option value="local">Local (Built-in)</option>
                                                 <option value="azure">Azure OpenAI</option>
                                                 <option value="gcp">Google Cloud Vertex AI</option>
+                                                <option value="multi">Multi-Provider (GCP → Azure → Local)</option>
                                             </select>
                                             <small>
                                                 {embeddingProvider === "local" && "Runs offline and free."}
                                                 {embeddingProvider === "azure" && "Uses Azure OpenAI API."}
                                                 {embeddingProvider === "gcp" && "Uses Google Vertex AI API."}
+                                                {embeddingProvider === "multi" && "Tries GCP, then Azure, then local — always gets an embedding."}
                                             </small>
                                         </div>
 
@@ -1105,12 +1120,21 @@ export default function App() {
                                         <div className="progress-bar">
                                             <div className="progress-fill" style={{ width: `${Math.min(100, embedProgress)}%` }} />
                                         </div>
-                                        <p style={{ marginTop: '0.5rem', color: 'var(--text-secondary)' }}>
-                                            Processing... {embedProgress}%
-                                            {embedProgressDetail && embedProgressDetail.total > 0 && (
-                                                <span> ({embedProgressDetail.processed}/{embedProgressDetail.total} files)</span>
-                                            )}
-                                        </p>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '0.5rem' }}>
+                                            <p style={{ margin: 0, color: 'var(--text-secondary)' }}>
+                                                Processing... {embedProgress}%
+                                                {embedProgressDetail && embedProgressDetail.total > 0 && (
+                                                    <span> ({embedProgressDetail.processed}/{embedProgressDetail.total} files)</span>
+                                                )}
+                                            </p>
+                                            <button
+                                                className="btn btn-secondary btn-small"
+                                                onClick={handleCancelEmbed}
+                                                title="Stop embedding and save progress so far"
+                                            >
+                                                ⏹ Cancel
+                                            </button>
+                                        </div>
                                     </div>
                                 )}
 

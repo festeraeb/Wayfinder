@@ -17,6 +17,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::scan_directory,
             commands::generate_embeddings,
+            commands::generate_embeddings_multi,
             commands::create_clusters,
             commands::search,
             commands::get_clusters_summary,
@@ -33,6 +34,7 @@ fn main() {
             commands::get_clusters_data,
             // Progress and error tracking
             commands::get_embedding_progress,
+            commands::cancel_embedding,
             commands::get_error_log,
             commands::clear_error_log,
             // Git Clippy Assistant commands

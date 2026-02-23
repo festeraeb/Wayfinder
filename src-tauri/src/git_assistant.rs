@@ -25,6 +25,8 @@ pub struct DuplicateFile {
     pub original: String,
     pub duplicates: Vec<String>,
     pub content_hash: String,
+    pub size_bytes: u64,
+    pub kept_mtime: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -186,33 +188,59 @@ pub fn find_duplicates(files: &[FileEntry]) -> Vec<DuplicateFile> {
     use std::fs;
     use std::hash::{Hash, Hasher};
 
-    let mut content_map: HashMap<u64, Vec<String>> = HashMap::new();
+    #[derive(Clone)]
+    struct FileMeta {
+        path: String,
+        size: u64,
+        mtime: Option<std::time::SystemTime>,
+    }
+
+    let mut content_map: HashMap<(u64, u64), Vec<FileMeta>> = HashMap::new();
 
     for file in files {
-        if let Ok(content) = fs::read_to_string(&file.path) {
-            let mut hasher = DefaultHasher::new();
-            content.hash(&mut hasher);
-            let hash = hasher.finish();
+        if let Ok(metadata) = fs::metadata(&file.path) {
+            let size = metadata.len();
+            // Skip zero-size files for duplicate detection
+            if size == 0 {
+                continue;
+            }
 
-            content_map
-                .entry(hash)
-                .or_insert_with(Vec::new)
-                .push(file.path.clone());
+            if let Ok(content) = fs::read_to_string(&file.path) {
+                let mut hasher = DefaultHasher::new();
+                content.hash(&mut hasher);
+                let hash = hasher.finish();
+
+                content_map
+                    .entry((size, hash))
+                    .or_insert_with(Vec::new)
+                    .push(FileMeta {
+                        path: file.path.clone(),
+                        size,
+                        mtime: metadata.modified().ok(),
+                    });
+            }
         }
     }
 
     let mut duplicates: Vec<DuplicateFile> = Vec::new();
 
-    for (hash, paths) in content_map {
-        if paths.len() > 1 {
-            let mut sorted_paths = paths.clone();
-            sorted_paths.sort_by(|a, b| a.len().cmp(&b.len()));
+    for ((size, hash), metas) in content_map {
+        if metas.len() > 1 {
+            let mut metas_sorted = metas.clone();
+            metas_sorted.sort_by(|a, b| b.mtime.cmp(&a.mtime)); // newest first
 
-            let original = sorted_paths.remove(0);
+            let keep = metas_sorted.remove(0);
+            let kept_mtime = keep
+                .mtime
+                .and_then(|t: std::time::SystemTime| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                .map(|d: std::time::Duration| d.as_secs().to_string());
+
             duplicates.push(DuplicateFile {
-                original,
-                duplicates: sorted_paths,
+                original: keep.path,
+                duplicates: metas_sorted.into_iter().map(|m| m.path).collect(),
                 content_hash: format!("{:x}", hash),
+                size_bytes: size,
+                kept_mtime,
             });
         }
     }
