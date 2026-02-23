@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import * as Types from "../types";
 
 export const tauriService = {
-    async scanDirectory(path: string, indexDir: string): Promise<Types.ScanResult> {
-        return invoke("scan_directory", { path, indexDir });
+    async scanDirectory(path: string, indexDir: string, extensions?: string[], allowAll?: boolean): Promise<Types.ScanResult> {
+        return invoke("scan_directory", { path, indexDir, extensions, allowAll });
     },
 
     async generateEmbeddings(indexDir: string, maxFiles?: number, batchSize?: number): Promise<Types.EmbedResult> {

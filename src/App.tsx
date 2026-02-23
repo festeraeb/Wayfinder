@@ -20,6 +20,7 @@ const FILE_TYPE_PRESETS = {
     "Config": [".json", ".yaml", ".yml", ".toml", ".ini"],
     "Web": [".html", ".htm", ".css", ".scss"],
     "All Text Files": ["*"],
+    "All Files": ["*"],
 };
 
 type OperationStatus = "idle" | "running" | "complete" | "error";
@@ -54,6 +55,7 @@ export default function App() {
     const [indexPath, setIndexPath] = useState<string>("");
     const [scanPath, setScanPath] = useState<string>("");
     const [selectedTypes, setSelectedTypes] = useState<string[]>(["Markdown"]);
+    const [gitRepoPath, setGitRepoPath] = useState<string>("");
 
     // Status/Stats state
     const [indexStats, setIndexStats] = useState<IndexStats | null>(null);
@@ -92,6 +94,7 @@ export default function App() {
     const [gcpEndpoint, setGcpEndpoint] = useState("");
     const [showGcpConfig, setShowGcpConfig] = useState(false);
     const [hasExistingGcpKey, setHasExistingGcpKey] = useState(false);
+    const [useGcpAdc, setUseGcpAdc] = useState(false); // Allow gcloud ADC instead of key file
 
     // Cluster state
     const [clusterStatus, setClusterStatus] = useState<OperationStatus>("idle");
@@ -110,7 +113,8 @@ export default function App() {
 
     // File watcher integration (notifications)
     // Using hooks and notification provider to surface file events
-    const { active: watcherActive, events: watcherEvents } = useFileWatcher(indexPath);
+    const [watchAll, setWatchAll] = useState(false);
+    const { active: watcherActive, events: watcherEvents } = useFileWatcher({ indexPath, watchAll });
     const { notify } = useNotifications();
 
     // Show toast for new watcher events
@@ -208,13 +212,38 @@ export default function App() {
         return () => clearInterval(interval);
     }, [indexPath, embedStatus, clusterStatus, scanStatus, activeSection]);
 
-    // Toggle file type selection
+    // Default Git repo path to the scan folder (or index folder root) if not set
+    useEffect(() => {
+        if (!gitRepoPath) {
+            if (scanPath) {
+                setGitRepoPath(scanPath);
+            } else if (indexPath && indexPath.includes('.wayfinder_index')) {
+                const root = indexPath.replace(/\\?\.wayfinder_index$/, '').replace(/\/\.wayfinder_index$/, '');
+                setGitRepoPath(root);
+            }
+        }
+    }, [scanPath, indexPath, gitRepoPath]);
+
+    // Toggle file type selection ("All Files" is exclusive)
     const toggleFileType = (type: string) => {
-        setSelectedTypes(prev =>
-            prev.includes(type)
+        setSelectedTypes(prev => {
+            const isAll = type === "All Files";
+            const hadAll = prev.includes("All Files");
+
+            if (isAll) {
+                return ["All Files"];
+            }
+
+            const next = prev.includes(type)
                 ? prev.filter(t => t !== type)
-                : [...prev, type]
-        );
+                : [...prev.filter(t => t !== "All Files"), type];
+
+            // If we removed the last item, fall back to the clicked one
+            if (next.length === 0) return [type];
+            // Ensure "All Files" is exclusive
+            if (hadAll) return next.filter(t => t !== "All Files");
+            return next;
+        });
     };
 
     // Get all selected extensions
@@ -260,7 +289,9 @@ export default function App() {
 
         try {
             console.log("Starting scan:", scanPath, effectiveIndexPath);
-            const result = await tauriService.scanDirectory(scanPath, effectiveIndexPath);
+            const selectedExts = getSelectedExtensions();
+            const allFiles = selectedExts.includes("*");
+            const result = await tauriService.scanDirectory(scanPath, effectiveIndexPath, selectedExts, allFiles);
             console.log("Scan result:", result);
             setScanResult(result);
             setIndexPath(effectiveIndexPath);
@@ -310,36 +341,40 @@ export default function App() {
                 setErrorMsg("Please fill in Project ID, Location, and Model ID");
                 return;
             }
-            if (!gcpServiceAccountPath && !hasExistingGcpKey) {
-                setErrorMsg("Please select your service account JSON file");
+            if (!useGcpAdc && !gcpServiceAccountPath && !hasExistingGcpKey) {
+                setErrorMsg("Select a service account JSON file or enable gcloud ADC");
                 return;
             }
 
             try {
-                const validation = await tauriService.validateGcpConfig(
-                    gcpProjectId,
-                    gcpLocation,
-                    gcpModelId,
-                    gcpServiceAccountPath || "",
-                    gcpEndpoint || undefined
-                );
-                if (validation && validation.success) {
-                    await tauriService.saveGcpConfig(
-                        indexPath,
+                if (!useGcpAdc) {
+                    const validation = await tauriService.validateGcpConfig(
                         gcpProjectId,
                         gcpLocation,
                         gcpModelId,
-                        gcpServiceAccountPath,
+                        gcpServiceAccountPath || "",
                         gcpEndpoint || undefined
                     );
-                    await tauriService.saveProviderConfig(indexPath, "gcp", localModel || undefined);
-                    await loadProviderConfig(indexPath); // refresh state to confirm persistence
-                    setGcpConfigured(true);
-                    setShowGcpConfig(false);
-                    setErrorMsg("");
-                } else {
-                    setErrorMsg(validation?.message || "GCP validation failed");
+                    if (!validation || !validation.success) {
+                        setErrorMsg(validation?.message || "GCP validation failed");
+                        return;
+                    }
                 }
+
+                await tauriService.saveGcpConfig(
+                    indexPath,
+                    gcpProjectId,
+                    gcpLocation,
+                    gcpModelId,
+                    useGcpAdc ? "" : gcpServiceAccountPath,
+                    gcpEndpoint || undefined
+                );
+                await tauriService.saveProviderConfig(indexPath, "gcp", localModel || undefined);
+                await loadProviderConfig(indexPath); // refresh state to confirm persistence
+                setHasExistingGcpKey(!useGcpAdc && !!gcpServiceAccountPath);
+                setGcpConfigured(true);
+                setShowGcpConfig(false);
+                setErrorMsg("");
             } catch (error: any) {
                 setErrorMsg(error.toString());
             }
@@ -690,6 +725,25 @@ export default function App() {
                                     <h3>Last Scan</h3>
                                     <span>{indexStats?.last_updated || "Unknown"}</span>
                                 </div>
+                                <div className="status-card">
+                                    <h3>File Watcher</h3>
+                                    <span className={`status-badge ${watcherActive ? "success" : "pending"}`}>
+                                        {watcherActive ? "Running" : "Stopped"}
+                                    </span>
+                                    <div style={{ marginTop: '8px' }}>
+                                        <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                                            <input
+                                                type="checkbox"
+                                                checked={watchAll}
+                                                onChange={(e) => setWatchAll(e.target.checked)}
+                                            />
+                                            Watch all user folders
+                                        </label>
+                                        <small style={{ display: 'block', marginTop: '4px', color: 'var(--text-secondary)' }}>
+                                            Uses default user folders (Desktop/Documents/Downloads). Uncheck to watch only the current index folder.
+                                        </small>
+                                    </div>
+                                </div>
                             </div>
                         )}
                     </section>
@@ -964,17 +1018,19 @@ export default function App() {
                                                     />
                                                 </div>
                                                 <div className="form-group">
-                                                    <label>Service Account JSON: {hasExistingGcpKey && <span style={{color: 'var(--success-color)', fontSize: '0.85em'}}> (saved)</span>}</label>
+                                                    <label>Service Account JSON: {hasExistingGcpKey && !useGcpAdc && <span style={{color: 'var(--success-color)', fontSize: '0.85em'}}> (saved)</span>}</label>
                                                     <div className="input-row">
                                                         <input
                                                             type="text"
-                                                            placeholder={hasExistingGcpKey ? "Key saved - select new to update" : "Select your service-account.json"}
-                                                            value={gcpServiceAccountPath}
+                                                            placeholder={useGcpAdc ? "Using gcloud ADC" : (hasExistingGcpKey ? "Key saved - select new to update" : "Select your service-account.json")}
+                                                            value={useGcpAdc ? "" : gcpServiceAccountPath}
                                                             readOnly
                                                             className="folder-input"
+                                                            disabled={useGcpAdc}
                                                         />
                                                         <button 
                                                             className="btn btn-secondary"
+                                                            disabled={useGcpAdc}
                                                             onClick={async () => {
                                                                 const selected = await open({
                                                                     multiple: false,
@@ -989,7 +1045,15 @@ export default function App() {
                                                             📂 Browse
                                                         </button>
                                                     </div>
-                                                    <small>File is read to request an OAuth token; path is stored locally.</small>
+                                                    <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginTop: '6px' }}>
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={useGcpAdc}
+                                                            onChange={(e) => setUseGcpAdc(e.target.checked)}
+                                                        />
+                                                        Use gcloud ADC (no key file)
+                                                    </label>
+                                                    <small>ADC uses your gcloud login (`gcloud auth application-default login`).</small>
                                                 </div>
                                                 <div className="form-group">
                                                     <label>Custom Endpoint (Optional):</label>
@@ -1280,7 +1344,48 @@ export default function App() {
                     <section className="content-section">
                         <h2>📎 Git Clippy Assistant</h2>
                         <p className="section-desc">Your friendly git helper for ADHD developers.</p>
-                        <GitAssistant repoPath={scanPath} indexPath={indexPath} />
+
+                        <div className="form-group">
+                            <label>Git repository path:</label>
+                            <div className="input-row">
+                                <input
+                                    type="text"
+                                    placeholder="Select a git repository"
+                                    value={gitRepoPath}
+                                    onChange={(e) => setGitRepoPath(e.target.value)}
+                                    className="folder-input"
+                                />
+                                <button
+                                    className="btn btn-secondary"
+                                    onClick={async () => {
+                                        const selected = await open({ directory: true, multiple: false, title: "Select git repository" });
+                                        if (selected && typeof selected === 'string') {
+                                            setGitRepoPath(selected);
+                                        }
+                                    }}
+                                >
+                                    📂 Browse
+                                </button>
+                                <button
+                                    className="btn btn-tertiary"
+                                    onClick={() => {
+                                        if (scanPath) {
+                                            setGitRepoPath(scanPath);
+                                        } else if (indexPath) {
+                                            const root = indexPath.includes('.wayfinder_index')
+                                                ? indexPath.replace(/\\?\.wayfinder_index$/, '').replace(/\/\.wayfinder_index$/, '')
+                                                : indexPath;
+                                            setGitRepoPath(root);
+                                        }
+                                    }}
+                                >
+                                    Use scan folder
+                                </button>
+                            </div>
+                            <small>Git Clippy can run on any repo, not just the last scanned folder.</small>
+                        </div>
+
+                        <GitAssistant repoPath={gitRepoPath} indexPath={indexPath} />
                     </section>
                 )}
             </main>

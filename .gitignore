@@ -57,6 +57,13 @@ src-tauri/target/
 # Azure credentials (DO NOT COMMIT)
 **/azure_config.json
 
+# Google Cloud / Vertex credentials and per-index config
+# Service account keys and local GCP config files should not be committed
+**/gcp_config.json
+*service-account*.json
+*-key.json
+wayfinder-ci-key.json
+
 # Wayfinder index data
 .wayfinder_index/
 

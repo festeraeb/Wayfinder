@@ -1,6 +1,6 @@
 // Tauri command handlers - Pure Rust implementation
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
@@ -254,7 +254,7 @@ fn log_error(index_dir: &Path, operation: &str, file_path: Option<&str>, error_m
 
 /// Scan a directory and create an index of text files
 #[tauri::command]
-pub async fn scan_directory(path: String, index_dir: String) -> Result<serde_json::Value, String> {
+pub async fn scan_directory(path: String, index_dir: String, extensions: Option<Vec<String>>, allow_all: Option<bool>) -> Result<serde_json::Value, String> {
     println!("[RUST] scan_directory called - path: {}, index_dir: {}", path, index_dir);
     
     let scan_path = Path::new(&path);
@@ -267,8 +267,8 @@ pub async fn scan_directory(path: String, index_dir: String) -> Result<serde_jso
     let mut files: Vec<FileEntry> = Vec::new();
     let mut total_size: u64 = 0;
 
-    // Common text file extensions
-    let text_extensions = vec![
+    // Common text file extensions (used as a sensible default)
+    let default_extensions = vec![
         "md", "txt", "text", "markdown", "mdx",
         "py", "pyw", "pyi",
         "js", "jsx", "ts", "tsx",
@@ -278,6 +278,27 @@ pub async fn scan_directory(path: String, index_dir: String) -> Result<serde_jso
         "sh", "bash", "zsh", "ps1", "bat", "cmd",
         "xml", "svg", "log",
     ];
+
+    // Normalize allowed extensions from the frontend; treat "*" or allow_all as "no filtering"
+    let allow_all_files = allow_all.unwrap_or(false)
+        || extensions.as_ref().map(|exts| exts.iter().any(|e| e.trim() == "*")).unwrap_or(false);
+
+    let allowed_set: Option<HashSet<String>> = if allow_all_files {
+        None
+    } else if let Some(exts) = extensions.clone() {
+        if exts.is_empty() {
+            Some(default_extensions.iter().map(|s| s.to_string()).collect())
+        } else {
+            Some(
+                exts.into_iter()
+                    .filter(|e| !e.trim().is_empty() && e.trim() != "*")
+                    .map(|e| e.trim_start_matches('.').to_lowercase())
+                    .collect(),
+            )
+        }
+    } else {
+        Some(default_extensions.iter().map(|s| s.to_string()).collect())
+    };
 
     for entry in WalkDir::new(&path)
         .follow_links(true)
@@ -300,9 +321,13 @@ pub async fn scan_directory(path: String, index_dir: String) -> Result<serde_jso
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            
-            // Only index text files
-            if text_extensions.contains(&ext.as_str()) {
+
+            let allowed = match &allowed_set {
+                None => true, // allow all
+                Some(set) => set.contains(&ext),
+            };
+
+            if allowed {
                 if let Ok(metadata) = fs::metadata(file_path) {
                     let size = metadata.len();
                     total_size += size;

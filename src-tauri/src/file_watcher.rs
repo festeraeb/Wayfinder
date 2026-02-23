@@ -276,12 +276,16 @@ fn process_event(
         map.insert(path.clone(), now);
     }
     
-    // Determine event type
+    // Determine event type (include renames/deletes so the UI sees removals)
     let event_type = match &event.kind {
         EventKind::Create(_) => FileEventType::Created,
+        EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
+            FileEventType::Renamed { from: path_str.clone() }
+        }
         EventKind::Modify(_) => FileEventType::Modified,
+        EventKind::Remove(_) => FileEventType::Modified,
         EventKind::Any => FileEventType::Modified,
-        _ => return None, // Ignore removes, access, etc.
+        _ => return None, // Ignore accesses, metadata-only, etc.
     };
     
     let file_name = path.file_name()
