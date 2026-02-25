@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 use chrono::{DateTime, Local};
 use rand::Rng;
@@ -94,6 +94,22 @@ pub struct FileEntry {
     pub size: u64,
     pub modified: String,
     pub extension: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ClassifiedFile {
+    pub path: String,
+    pub project: String,
+    pub confidence: f32,
+    pub reasons: Vec<String>,
+    pub alternates: Vec<(String, f32)>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MovePlanEntry {
+    pub from: String,
+    pub to: String,
+    pub link_type: String, // junction | symlink | hardlink | copy
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -2631,6 +2647,74 @@ pub async fn validate_gcp_config(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Commands: classify files and build reversible view
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn classify_files(
+    index_dir: String,
+    labels: HashMap<String, Vec<String>>,
+    top_n: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let index_path = Path::new(&index_dir);
+    let index_file = index_path.join("index.json");
+    if !index_file.exists() {
+        return Err("Index not found. Run scan first.".to_string());
+    }
+    let content = fs::read_to_string(&index_file).map_err(|e| format!("Failed to read index: {}", e))?;
+    let index_data: IndexData = serde_json::from_str(&content).map_err(|e| format!("Failed to parse index: {}", e))?;
+
+    let limit = top_n.unwrap_or(index_data.files.len());
+    let files: Vec<FileEntry> = index_data.files.into_iter().take(limit).collect();
+    let classified = classify_files_with_labels(&files, &labels);
+
+    Ok(serde_json::json!({
+        "success": true,
+        "classified": classified,
+    }))
+}
+
+#[tauri::command]
+pub async fn build_view_plan(
+    classified: Vec<ClassifiedFile>,
+    view_root: String,
+    prefer_junction: Option<bool>,
+    dry_run: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let view_root_path = PathBuf::from(&view_root);
+    let prefer_junction = prefer_junction.unwrap_or(true);
+    let dry = dry_run.unwrap_or(true);
+
+    let plan = propose_move_plan(&classified, &view_root_path);
+    let mut applied: Vec<MovePlanEntry> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    if !dry {
+        for entry in &plan {
+            let from = Path::new(&entry.from);
+            let to = Path::new(&entry.to);
+            match create_link(from, to, prefer_junction) {
+                Ok(kind) => {
+                    let mut e = entry.clone();
+                    e.link_type = kind;
+                    applied.push(e);
+                }
+                Err(err) => errors.push(err),
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "success": errors.is_empty(),
+        "plan": plan,
+        "applied": applied,
+        "errors": errors,
+        "dry_run": dry,
+        "view_root": view_root,
+    }))
+}
+
 /// Validate azure_config.json files found under a root path (recursively)
 #[tauri::command]
 pub async fn validate_all_azure_configs(root_path: String) -> Result<serde_json::Value, String> {
@@ -3339,5 +3423,147 @@ fn collapse_versions(files: Vec<FileEntry>) -> (Vec<FileEntry>, usize, usize) {
 
     groups = map.len();
     (map.into_values().collect(), groups, collapsed)
+}
+
+// ---------------------------------------------------------------------------
+// Project classification and move-plan generation
+// ---------------------------------------------------------------------------
+
+fn tokenize_path(path: &str) -> Vec<String> {
+    Path::new(path)
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .flat_map(|s| s.split(|ch: char| !ch.is_alphanumeric()))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .collect()
+}
+
+fn score_file(label: &str, tokens: &[String]) -> (f32, Vec<String>) {
+    let mut score = 0.0f32;
+    let mut reasons = Vec::new();
+    let needle = label.to_lowercase();
+    let hits: Vec<&String> = tokens.iter().filter(|t| t.contains(&needle)).collect();
+    if !hits.is_empty() {
+        score += 1.0;
+        reasons.push(format!("path matches {:?}", hits));
+    }
+    score
+        += tokens
+            .iter()
+            .filter(|t| t == &&needle)
+            .count() as f32
+            * 0.5;
+    if score > 0.0 {
+        reasons.push(format!("token hit for {}", label));
+    }
+    (score, reasons)
+}
+
+fn classify_files_with_labels(files: &[FileEntry], labels: &HashMap<String, Vec<String>>) -> Vec<ClassifiedFile> {
+    let mut out = Vec::new();
+    for f in files {
+        let tokens = tokenize_path(&f.path);
+        let mut best = ("unsorted".to_string(), 0.0f32, Vec::new());
+        let mut alts: Vec<(String, f32)> = Vec::new();
+
+        for (label, seeds) in labels {
+            let mut label_score = 0.0f32;
+            let mut reasons = Vec::new();
+            for seed in seeds {
+                let (s, r) = score_file(seed, &tokens);
+                label_score += s;
+                reasons.extend(r);
+            }
+            if label_score > best.1 {
+                if best.1 > 0.0 {
+                    alts.push((best.0.clone(), best.1));
+                }
+                best = (label.clone(), label_score, reasons);
+            } else if label_score > 0.0 {
+                alts.push((label.clone(), label_score));
+            }
+        }
+
+        if best.1 == 0.0 {
+            best.0 = "unsorted".to_string();
+        }
+
+        alts.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        out.push(ClassifiedFile {
+            path: f.path.clone(),
+            project: best.0,
+            confidence: best.1,
+            reasons: best.2,
+            alternates: alts.into_iter().take(3).collect(),
+        });
+    }
+    out
+}
+
+fn propose_move_plan(classified: &[ClassifiedFile], view_root: &Path) -> Vec<MovePlanEntry> {
+    let mut plan = Vec::new();
+    for cf in classified {
+        if cf.project == "unsorted" {
+            continue;
+        }
+        let rel = Path::new(&cf.path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+        let dest = view_root.join(&cf.project).join(rel);
+        plan.push(MovePlanEntry {
+            from: cf.path.clone(),
+            to: dest.to_string_lossy().to_string(),
+            link_type: "symlink".to_string(),
+        });
+    }
+    plan
+}
+
+fn create_link(from: &Path, to: &Path, prefer_junction: bool) -> Result<String, String> {
+    if prefer_junction {
+        if to.exists() {
+            return Ok("exists".to_string());
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("Failed to mkdir {:?}: {}", parent, e))?;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if std::os::windows::fs::symlink_dir(from, to).is_ok() {
+                return Ok("junction".to_string());
+            }
+        }
+    }
+
+    if to.exists() {
+        return Ok("exists".to_string());
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to mkdir {:?}: {}", parent, e))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if std::os::windows::fs::symlink_file(from, to).is_ok() {
+            return Ok("symlink".to_string());
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if std::os::unix::fs::symlink(from, to).is_ok() {
+            return Ok("symlink".to_string());
+        }
+    }
+
+    if std::fs::hard_link(from, to).is_ok() {
+        return Ok("hardlink".to_string());
+    }
+
+    std::fs::copy(from, to)
+        .map(|_| "copy".to_string())
+        .map_err(|e| format!("Failed to copy {:?} -> {:?}: {}", from, to, e))
 }
 

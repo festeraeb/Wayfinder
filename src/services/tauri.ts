@@ -159,6 +159,14 @@ export const tauriService = {
         return invoke("snooze_reminder", { id, hours });
     },
 
+    async classifyFiles(indexDir: string, labels: Record<string, string[]>, topN?: number): Promise<{ success: boolean; classified: any[] }> {
+        return invoke("classify_files", { indexDir, labels, topN });
+    },
+
+    async buildViewPlan(classified: any[], viewRoot: string, preferJunction?: boolean, dryRun?: boolean): Promise<{ success: boolean; plan: any[]; applied: any[]; errors: string[] }> {
+        return invoke("build_view_plan", { classified, viewRoot, preferJunction, dryRun });
+    },
+
     // Git Assistant
     async getGitClippyReport(repoPath: string, indexDir?: string): Promise<Types.GitClippyReport> {
         return invoke("get_git_clippy_report", { repoPath, indexDir });
