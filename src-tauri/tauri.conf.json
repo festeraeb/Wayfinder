@@ -4,7 +4,7 @@
   "version": "2.0.0",
   "identifier": "com.wayfinder.app",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "",
     "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"

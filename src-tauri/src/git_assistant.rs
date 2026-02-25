@@ -547,6 +547,39 @@ pub fn generate_clippy_report(
         });
     }
 
+    // Long inactivity with clean working tree: offer archive/reminder options
+    if status.days_since_commit > 14 && status.uncommitted_files == 0 {
+        suggestions.push(ClippySuggestion {
+            id: "stale_repo_no_changes".to_string(),
+            icon: "🗂️".to_string(),
+            title: format!("{} days since last commit", status.days_since_commit),
+            description: "No uncommitted changes. Want to archive, set a reminder, or mark it done?".to_string(),
+            actions: vec![
+                ClippyAction {
+                    label: "Archive snapshot".to_string(),
+                    action_type: "archive_project".to_string(),
+                    data: None,
+                },
+                ClippyAction {
+                    label: "Set reminder".to_string(),
+                    action_type: "set_reminder".to_string(),
+                    data: Some(serde_json::json!({"days": 7})),
+                },
+                ClippyAction {
+                    label: "Mark completed".to_string(),
+                    action_type: "mark_completed".to_string(),
+                    data: None,
+                },
+                ClippyAction {
+                    label: "Eh, I'm good".to_string(),
+                    action_type: "dismiss".to_string(),
+                    data: None,
+                },
+            ],
+            priority: 4,
+        });
+    }
+
     // Find duplicates if we have index data
     if let Some(files) = index_files {
         duplicates = find_duplicates(files);
@@ -806,6 +839,29 @@ pub fn execute_git_action(
         }
         "learn_branches" => {
             Ok("📎 Quick branching tip:\n\n    git checkout -b feature/my-new-thing\n    <do your experiments>\n    git add -A && git commit -m 'Experiment: my new thing'\n\n    Now you have version control instead of:\n    bag_scanner_copy_final_v2_ACTUAL_working.py 📋".to_string())
+        }
+        "archive_project" => {
+            let branch_name = format!("archive-{}", Local::now().format("%Y%m%d"));
+            // Create a lightweight branch marker without switching
+            let existing = run_git_command(repo_path, &["branch", "--list", &branch_name])?
+                .lines()
+                .any(|l| l.trim() == branch_name);
+            if !existing {
+                run_git_command(repo_path, &["branch", &branch_name])?;
+            }
+            Ok(format!("📎 Archived snapshot on branch '{}'. You can checkout later with: git checkout {}", branch_name, branch_name))
+        }
+        "set_reminder" => {
+            let days = data
+                .and_then(|d| d.get("days"))
+                .and_then(|n| n.as_i64())
+                .unwrap_or(7);
+            Ok(format!("📎 Reminder noted: revisit in ~{} days. (Tip: add a calendar reminder or issue to track it.)", days))
+        }
+        "mark_completed" => {
+            let tag = format!("completed-{}", Local::now().format("%Y%m%d"));
+            let _ = run_git_command(repo_path, &["tag", &tag]);
+            Ok(format!("📎 Marked as completed with tag '{}'.", tag))
         }
         _ => Err(format!("Unknown action: {}", action)),
     }

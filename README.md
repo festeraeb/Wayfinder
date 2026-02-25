@@ -76,6 +76,24 @@ npm run tauri dev
 npm run tauri build
 ```
 
+### Local koboldcpp defaults (bundled flow)
+
+Wayfinder now defaults to local endpoints/models so you can run without retyping:
+
+Terminal 1 (chat LLM):
+```
+koboldcpp.exe --model qwen2.5-coder-1.5b-instruct-q4_k_m.gguf --port 5001 --gpulayers 99
+```
+API base: http://localhost:5001/v1
+
+Terminal 2 (embeddings):
+```
+koboldcpp.exe --model embeddinggemma-300m-f16.gguf --port 5002 --gpulayers 99 --embeddings
+```
+API base: http://localhost:5002/v1
+
+In-app defaults: Embeddings provider is set to llama with model `embeddinggemma-300m-f16` at `http://localhost:5002`; Git Clippy chat uses `qwen2.5-coder-1.5b-instruct-q4_k_m.gguf` at `http://localhost:5001`.
+
 ### Configure Azure OpenAI
 
 1. Copy the template config:

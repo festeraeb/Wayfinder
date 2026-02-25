@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { tauriService } from '../services/tauri';
 import './GitAssistant.css';
 
 interface GitStatus {
@@ -70,9 +71,11 @@ interface GitClippyReport {
 interface Props {
     repoPath: string;
     indexPath: string;
+    chatEndpoint?: string;
+    chatModel?: string;
 }
 
-export const GitAssistant: React.FC<Props> = ({ repoPath, indexPath }) => {
+export const GitAssistant: React.FC<Props> = ({ repoPath, indexPath, chatEndpoint, chatModel }) => {
     const [report, setReport] = useState<GitClippyReport | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -180,7 +183,7 @@ export const GitAssistant: React.FC<Props> = ({ repoPath, indexPath }) => {
         setChatLoading(true);
         setChatError(null);
         try {
-            const res = await tauriService.chatLlama(chatInput, "qwen2.5-coder-1.5b-instruct", undefined);
+            const res = await tauriService.chatLlama(chatInput, chatModel || "qwen2.5-coder-1.5b-instruct", chatEndpoint || undefined);
             setChatReply(res.text);
         } catch (e) {
             setChatError(String(e));

@@ -185,7 +185,7 @@ impl Default for EmbeddingJobConfig {
 }
 
 fn default_local_model_name() -> String {
-    "BAAI/bge-small-en-v1.5".to_string()
+    "embeddinggemma-300m-f16".to_string()
 }
 
 fn read_provider_config(index_path: &Path) -> Option<ProviderConfig> {
@@ -217,9 +217,9 @@ fn resolve_provider_config(index_path: &Path) -> ProviderConfig {
     }
 
     ProviderConfig {
-        provider: EmbeddingProvider::Local,
+        provider: EmbeddingProvider::Llama,
         local_model: Some(default_local_model_name()),
-        local_endpoint: Some("http://127.0.0.1:8080".to_string()),
+        local_endpoint: Some("http://localhost:5002".to_string()),
     }
 }
 
@@ -585,6 +585,11 @@ pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usiz
     let progress_file = index_path.join("embedding_progress.json");
     let cancel_file = index_path.join("embedding_cancel");
 
+    // Clear stale cancel signals from previous runs
+    if cancel_file.exists() {
+        let _ = fs::remove_file(&cancel_file);
+    }
+
     if !index_file.exists() {
         return Err("Index not found. Please scan a directory first.".to_string());
     }
@@ -599,9 +604,9 @@ pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usiz
     };
 
     let client = reqwest::Client::new();
-    let base = endpoint.unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+    let base = endpoint.unwrap_or_else(|| "http://localhost:5002".to_string());
     let url = format!("{}/v1/embeddings", base.trim_end_matches('/'));
-    let model = model_name.unwrap_or_else(|| "embedding-gemma-002".to_string());
+    let model = model_name.unwrap_or_else(|| "embeddinggemma-300m-f16".to_string());
 
     let chunk_size = batch_size.unwrap_or(64).max(1);
     let total_files = files_to_process.len();
@@ -658,10 +663,11 @@ pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usiz
 
             match client.post(&url).json(&payload).send().await {
                 Ok(resp) => {
-                    if !resp.status().is_success() {
+                    let status = resp.status();
+                    if !status.is_success() {
                         let err_text = resp.text().await.unwrap_or_default();
                         error_count += 1;
-                        log_error(index_path, "llama_api_error", Some(&file.path), &err_text, Some(&resp.status().as_u16().to_string()));
+                        log_error(index_path, "llama_api_error", Some(&file.path), &err_text, Some(&status.as_u16().to_string()));
                         continue;
                     }
                     match resp.json::<serde_json::Value>().await {
@@ -723,7 +729,13 @@ pub async fn generate_embeddings_azure(index_dir: String, max_files: Option<usiz
     let embeddings_file = index_path.join("embeddings.json");
     let progress_file = index_path.join("embedding_progress.json");
     let batch_dir = index_path.join("embedding_batches");
+    let cancel_file = index_path.join("embedding_cancel");
     let _ = fs::create_dir_all(&batch_dir);
+
+    // Clear stale cancel signals from previous runs
+    if cancel_file.exists() {
+        let _ = fs::remove_file(&cancel_file);
+    }
 
     // Configuration
     let config_batch_size = batch_size.unwrap_or(100);
@@ -987,6 +999,11 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
     let embeddings_file = index_path.join("embeddings.json");
     let progress_file = index_path.join("embedding_progress.json");
     let cancel_file = index_path.join("embedding_cancel");
+
+    // Clear stale cancel signals from previous runs
+    if cancel_file.exists() {
+        let _ = fs::remove_file(&cancel_file);
+    }
 
     if !config_file.exists() {
         return Err("GCP config not found. Please configure GCP settings first.".to_string());
@@ -2129,12 +2146,20 @@ pub async fn save_provider_config(
 
     let model = match provider_enum {
         EmbeddingProvider::Local => Some(local_model.unwrap_or_else(default_local_model_name)),
-        EmbeddingProvider::Llama => local_model.or_else(|| Some("embedding-gemma-002".to_string())),
+        EmbeddingProvider::Llama => local_model.or_else(|| Some("embeddinggemma-300m-f16".to_string())),
         EmbeddingProvider::Azure => local_model.clone(),
         EmbeddingProvider::Gcp => local_model,
     };
 
-    write_provider_config(index_path, provider_enum, model, local_endpoint)?;
+    let endpoint = match provider_enum {
+        EmbeddingProvider::Llama => {
+            let trimmed = local_endpoint.unwrap_or_default().trim().to_string();
+            if trimmed.is_empty() { Some("http://localhost:5002".to_string()) } else { Some(trimmed) }
+        },
+        _ => local_endpoint,
+    };
+
+    write_provider_config(index_path, provider_enum, model, endpoint)?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -2712,9 +2737,9 @@ pub async fn delete_duplicate_files(file_paths: Vec<String>) -> Result<serde_jso
 #[tauri::command]
 pub async fn chat_llama(prompt: String, model: Option<String>, endpoint: Option<String>) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
-    let base = endpoint.unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+    let base = endpoint.unwrap_or_else(|| "http://localhost:5001".to_string());
     let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
-    let model_name = model.unwrap_or_else(|| "qwen2.5-coder-1.5b-instruct".to_string());
+    let model_name = model.unwrap_or_else(|| "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf".to_string());
 
     let payload = serde_json::json!({
         "model": model_name,
@@ -2728,9 +2753,10 @@ pub async fn chat_llama(prompt: String, model: Option<String>, endpoint: Option<
 
     let resp = client.post(&url).json(&payload).send().await
         .map_err(|e| format!("Request failed: {}", e))?;
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if !status.is_success() {
         let err_text = resp.text().await.unwrap_or_default();
-        return Err(format!("Chat failed ({}): {}", resp.status(), err_text));
+        return Err(format!("Chat failed ({}): {}", status, err_text));
     }
 
     let json: serde_json::Value = resp.json().await.map_err(|e| format!("Parse failed: {}", e))?;

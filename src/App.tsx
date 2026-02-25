@@ -75,9 +75,14 @@ export default function App() {
     const [embedBatchSize, setEmbedBatchSize] = useState<number | undefined>(undefined);
 
     // Embedding provider config state
-    const [embeddingProvider, setEmbeddingProvider] = useState<"local" | "llama" | "azure" | "gcp" | "multi">("local");
-    const [localModel, setLocalModel] = useState("BAAI/bge-small-en-v1.5");
-    const [localEndpoint, setLocalEndpoint] = useState("http://127.0.0.1:8080");
+    const [embeddingProvider, setEmbeddingProvider] = useState<"local" | "llama" | "azure" | "gcp" | "multi">("llama");
+    const [localModel, setLocalModel] = useState("embeddinggemma-300m-f16");
+    const [localEndpoint, setLocalEndpoint] = useState("http://localhost:5002");
+
+    // Global quick-config modal
+    const [showGlobalConfig, setShowGlobalConfig] = useState(false);
+    const [llamaChatEndpoint, setLlamaChatEndpoint] = useState("http://localhost:5001");
+    const [llamaChatModel, setLlamaChatModel] = useState("qwen2.5-coder-1.5b-instruct-q4_k_m.gguf");
     
     // Azure state
     const [azureConfigured, setAzureConfigured] = useState(false);
@@ -186,9 +191,13 @@ export default function App() {
             }
             if (provider.local_model) {
                 setLocalModel(provider.local_model);
+            } else {
+                setLocalModel("embeddinggemma-300m-f16");
             }
             if (provider.local_endpoint) {
                 setLocalEndpoint(provider.local_endpoint);
+            } else {
+                setLocalEndpoint("http://localhost:5002");
             }
             if (provider.provider === "azure") {
                 await loadAzureConfig(dir);
@@ -199,7 +208,9 @@ export default function App() {
                 setGcpConfigured(true);
             }
         } catch (error) {
-            setEmbeddingProvider("local");
+            setEmbeddingProvider("llama");
+            setLocalModel("embeddinggemma-300m-f16");
+            setLocalEndpoint("http://localhost:5002");
         }
     };
         
@@ -461,6 +472,11 @@ export default function App() {
         setValidationMessage("");
     };
 
+    const handleGlobalSave = async () => {
+        await saveEmbeddingConfig();
+        setShowGlobalConfig(false);
+    };
+
     // Validation results UI state
     const [validationResults, setValidationResults] = useState<any[]>([]);
     const [showValidationResults, setShowValidationResults] = useState(false);
@@ -656,49 +672,58 @@ export default function App() {
                             <span className="stat-value">{indexStats?.cluster_count || 0}</span>
                         </div>
                     </div>
-                    {indexPath && (
-                        <div className="index-path-display">
-                            📁 {indexPath}
-                            <button
-                                className="btn btn-small"
-                                style={{ marginLeft: '0.5rem' }}
-                                onClick={async () => {
-                                    try {
-                                        const selected = await open({ directory: true, multiple: false, title: 'Select index or scan folder' });
-                                        if (selected && typeof selected === 'string') {
-                                            const path = selected as string;
-                                            const candidateIndex = path.replace(/\/+$/, '') + '/.wayfinder_index';
-                                            // Prefer .wayfinder_index inside the selected folder, otherwise the folder itself
-                                            let chosen = path;
-                                            try {
-                                                const v1 = await tauriService.validateIndex(candidateIndex);
-                                                if (v1 && v1.index_valid) {
-                                                    chosen = candidateIndex;
-                                                } else {
-                                                    const v2 = await tauriService.validateIndex(path);
-                                                    if (v2 && v2.index_valid) {
-                                                        chosen = path;
+                    <div className="top-actions">
+                        {indexPath && (
+                            <div className="index-path-display">
+                                📁 {indexPath}
+                                <button
+                                    className="btn btn-small"
+                                    style={{ marginLeft: '0.5rem' }}
+                                    onClick={async () => {
+                                        try {
+                                            const selected = await open({ directory: true, multiple: false, title: 'Select index or scan folder' });
+                                            if (selected && typeof selected === 'string') {
+                                                const path = selected as string;
+                                                const candidateIndex = path.replace(/\/+$/, '') + '/.wayfinder_index';
+                                                // Prefer .wayfinder_index inside the selected folder, otherwise the folder itself
+                                                let chosen = path;
+                                                try {
+                                                    const v1 = await tauriService.validateIndex(candidateIndex);
+                                                    if (v1 && v1.index_valid) {
+                                                        chosen = candidateIndex;
+                                                    } else {
+                                                        const v2 = await tauriService.validateIndex(path);
+                                                        if (v2 && v2.index_valid) {
+                                                            chosen = path;
+                                                        }
                                                     }
+                                                } catch (e) {
+                                                    // ignore validation errors and just set selected
+                                                    chosen = path;
                                                 }
-                                            } catch (e) {
-                                                // ignore validation errors and just set selected
-                                                chosen = path;
-                                            }
 
-                                            setIndexPath(chosen);
-                                            // Refresh stats and config
-                                            await loadStats();
-                                            await loadProviderConfig(chosen);
+                                                setIndexPath(chosen);
+                                                // Refresh stats and config
+                                                await loadStats();
+                                                await loadProviderConfig(chosen);
+                                            }
+                                        } catch (err) {
+                                            console.error('Choose index error', err);
                                         }
-                                    } catch (err) {
-                                        console.error('Choose index error', err);
-                                    }
-                                }}
-                            >
-                                📂 Choose
-                            </button>
-                        </div>
-                    )}
+                                    }}
+                                >
+                                    📂 Choose
+                                </button>
+                            </div>
+                        )}
+                        <button
+                            className="icon-button"
+                            title="Configure LLM & embeddings"
+                            onClick={() => setShowGlobalConfig(true)}
+                        >
+                            ⚙️
+                        </button>
+                    </div>
                 </div>
 
                 {/* Error Display */}
@@ -1547,7 +1572,12 @@ export default function App() {
                             <small>Git Clippy can run on any repo, not just the last scanned folder.</small>
                         </div>
 
-                        <GitAssistant repoPath={gitRepoPath} indexPath={indexPath} />
+                        <GitAssistant
+                            repoPath={gitRepoPath}
+                            indexPath={indexPath}
+                            chatEndpoint={llamaChatEndpoint || undefined}
+                            chatModel={llamaChatModel || undefined}
+                        />
                     </section>
                 )}
 
@@ -1557,6 +1587,196 @@ export default function App() {
                         <p className="section-desc">Watch non-git folders (e.g., Documents, Downloads, Pictures) for duplicates and copy/backup clutter.</p>
                         <NautiClippy defaultPaths={scanPath ? [scanPath] : []} />
                     </section>
+                )}
+
+                {showGlobalConfig && (
+                    <div className="modal-overlay" onClick={() => setShowGlobalConfig(false)}>
+                        <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+                            <div className="modal-header">
+                                <h3>⚙️ AI Configuration</h3>
+                                <button className="close-btn" onClick={() => setShowGlobalConfig(false)}>×</button>
+                            </div>
+                            <div className="modal-content modal-content-scroll">
+                                <div className="config-grid">
+                                    <div className="form-block">
+                                        <h4>Embedding Provider</h4>
+                                        <div className="form-group">
+                                            <label>Provider:</label>
+                                            <select
+                                                value={embeddingProvider}
+                                                onChange={(e) => {
+                                                    const value = e.target.value as any;
+                                                    setEmbeddingProvider(value);
+                                                    if (value === "local" || value === "llama") {
+                                                        setAzureConfigured(true);
+                                                        setGcpConfigured(true);
+                                                        setErrorMsg("");
+                                                        setShowAzureConfig(false);
+                                                        setShowGcpConfig(false);
+                                                    } else if (value === "azure") {
+                                                        if (indexPath) loadAzureConfig(indexPath);
+                                                        setShowAzureConfig(true);
+                                                        setShowGcpConfig(false);
+                                                    } else if (value === "gcp") {
+                                                        if (indexPath) loadGcpConfig(indexPath);
+                                                        setShowGcpConfig(true);
+                                                        setShowAzureConfig(false);
+                                                    }
+                                                }}
+                                            >
+                                                <option value="local">Local (Deterministic CPU)</option>
+                                                <option value="llama">Local llama.cpp (GPU/CPU)</option>
+                                                <option value="azure">Azure OpenAI</option>
+                                                <option value="gcp">Google Cloud Vertex AI</option>
+                                                <option value="multi">Multi-Provider (GCP → Azure → Local)</option>
+                                            </select>
+                                        </div>
+
+                                        {(embeddingProvider === "local" || embeddingProvider === "llama") && (
+                                            <div className="form-group">
+                                                <label>Local Model:</label>
+                                                <input
+                                                    type="text"
+                                                    placeholder="BAAI/bge-small-en-v1.5"
+                                                    value={localModel}
+                                                    onChange={(e) => setLocalModel(e.target.value)}
+                                                />
+                                            </div>
+                                        )}
+
+                                        {embeddingProvider === "llama" && (
+                                            <div className="form-group">
+                                                <label>Local Endpoint (llama.cpp embeddings):</label>
+                                                <input
+                                                    type="text"
+                                                    placeholder="http://127.0.0.1:8080"
+                                                    value={localEndpoint}
+                                                    onChange={(e) => setLocalEndpoint(e.target.value)}
+                                                />
+                                                <small>Use your embedding server base URL (e.g., http://localhost:5002).</small>
+                                            </div>
+                                        )}
+
+                                        {embeddingProvider === "azure" && (
+                                            <div className="provider-config">
+                                                <div className="form-group">
+                                                    <label>Azure OpenAI Endpoint:</label>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="https://your-resource.cognitiveservices.azure.com"
+                                                        value={azureEndpoint}
+                                                        onChange={(e) => setAzureEndpoint(e.target.value)}
+                                                    />
+                                                </div>
+                                                <div className="form-group">
+                                                    <label>API Key:</label>
+                                                    <input
+                                                        type="password"
+                                                        placeholder={hasExistingKey ? "Key saved - enter new to update" : "Your Azure OpenAI API key"}
+                                                        value={azureApiKey}
+                                                        onChange={(e) => setAzureApiKey(e.target.value)}
+                                                    />
+                                                </div>
+                                                <div className="form-group">
+                                                    <label>Deployment Name:</label>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="text-embedding-3-small"
+                                                        value={azureDeployment}
+                                                        onChange={(e) => setAzureDeployment(e.target.value)}
+                                                    />
+                                                </div>
+                                                <div className="form-group">
+                                                    <label>API Version (optional):</label>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="2024-02-01"
+                                                        value={azureApiVersion}
+                                                        onChange={(e) => setAzureApiVersion(e.target.value)}
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {embeddingProvider === "gcp" && (
+                                            <div className="provider-config">
+                                                <div className="form-group">
+                                                    <label>Project ID:</label>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="my-gcp-project-id"
+                                                        value={gcpProjectId}
+                                                        onChange={(e) => setGcpProjectId(e.target.value)}
+                                                    />
+                                                </div>
+                                                <div className="form-group">
+                                                    <label>Location:</label>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="us-central1"
+                                                        value={gcpLocation}
+                                                        onChange={(e) => setGcpLocation(e.target.value)}
+                                                    />
+                                                </div>
+                                                <div className="form-group">
+                                                    <label>Model ID:</label>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="text-embedding-004"
+                                                        value={gcpModelId}
+                                                        onChange={(e) => setGcpModelId(e.target.value)}
+                                                    />
+                                                </div>
+                                                <div className="form-group">
+                                                    <label>Custom Endpoint (optional):</label>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="https://custom-vm-url/predict"
+                                                        value={gcpEndpoint}
+                                                        onChange={(e) => setGcpEndpoint(e.target.value)}
+                                                    />
+                                                </div>
+                                                <small>Upload keys in the Embeddings panel; ADC toggle also lives there.</small>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="form-block">
+                                        <h4>Local Chat Defaults</h4>
+                                        <div className="form-group">
+                                            <label>Chat Endpoint:</label>
+                                            <input
+                                                type="text"
+                                                placeholder="http://localhost:5001"
+                                                value={llamaChatEndpoint}
+                                                onChange={(e) => setLlamaChatEndpoint(e.target.value)}
+                                            />
+                                            <small>Base URL for the local chat server (used by Git Clippy chat).</small>
+                                        </div>
+                                        <div className="form-group">
+                                            <label>Chat Model:</label>
+                                            <input
+                                                type="text"
+                                                placeholder="qwen2.5-coder-1.5b-instruct"
+                                                value={llamaChatModel}
+                                                onChange={(e) => setLlamaChatModel(e.target.value)}
+                                            />
+                                            <small>Matches the model string your server exposes.</small>
+                                        </div>
+                                    </div>
+                                </div>
+                                {!indexPath && (
+                                    <p className="hint" style={{ marginTop: '0.5rem' }}>
+                                        Scan a folder first to persist embedding provider settings to an index.
+                                    </p>
+                                )}
+                            </div>
+                            <div className="modal-footer">
+                                <button className="btn btn-secondary" onClick={() => setShowGlobalConfig(false)}>Close</button>
+                                <button className="btn btn-primary" onClick={handleGlobalSave}>Save &amp; Close</button>
+                            </div>
+                        </div>
+                    </div>
                 )}
             </main>
         </div>
