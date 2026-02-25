@@ -424,6 +424,14 @@ pub fn generate_clippy_report(
     let mut suggestions: Vec<ClippySuggestion> = Vec::new();
     let mut duplicates: Vec<DuplicateFile> = Vec::new();
     let mut copy_pattern_files: Vec<FileSuggestion> = Vec::new();
+    let mut stub_count: usize = 0;
+    let mut duplicate_count: usize = 0;
+
+    if let Some(files) = index_files {
+        duplicates = find_duplicates(files);
+        duplicate_count = duplicates.iter().map(|d| d.duplicates.len()).sum();
+        stub_count = files.iter().filter(|f| f.size < 512).count();
+    }
 
     // Check uncommitted files
     if status.uncommitted_files > 200 {
@@ -553,7 +561,7 @@ pub fn generate_clippy_report(
             id: "stale_repo_no_changes".to_string(),
             icon: "🗂️".to_string(),
             title: format!("{} days since last commit", status.days_since_commit),
-            description: "No uncommitted changes. Want to archive, set a reminder, or mark it done?".to_string(),
+            description: format!("No uncommitted changes. {:?} duplicates, {:?} stubs. Want to archive, set a reminder, or mark it done?", duplicate_count, stub_count),
             actions: vec![
                 ClippyAction {
                     label: "Archive snapshot".to_string(),

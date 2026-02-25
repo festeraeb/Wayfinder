@@ -142,6 +142,23 @@ export const tauriService = {
         return invoke("get_clusters_data", { indexDir });
     },
 
+    // Reminders
+    async listReminders(includeDone?: boolean): Promise<{ success: boolean; reminders: any[] }> {
+        return invoke("list_reminders", { includeDone });
+    },
+
+    async addReminder(title: string, due?: string, severity?: string, linkPath?: string, repoPath?: string): Promise<{ success: boolean; reminder: any }> {
+        return invoke("add_reminder", { title, due, severity, linkPath, repoPath });
+    },
+
+    async updateReminderStatus(id: string, status: string): Promise<{ success: boolean }> {
+        return invoke("update_reminder_status", { id, status });
+    },
+
+    async snoozeReminder(id: string, hours: number): Promise<{ success: boolean }> {
+        return invoke("snooze_reminder", { id, hours });
+    },
+
     // Git Assistant
     async getGitClippyReport(repoPath: string, indexDir?: string): Promise<Types.GitClippyReport> {
         return invoke("get_git_clippy_report", { repoPath, indexDir });

@@ -8,6 +8,7 @@ use chrono::{DateTime, Local};
 use rand::Rng;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // Import git_assistant module from crate root
 use crate::git_assistant;
@@ -147,6 +148,25 @@ pub struct ErrorLog {
     pub last_updated: String,
 }
 
+// Reminders
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Reminder {
+    pub id: String,
+    pub title: String,
+    pub due: Option<String>,
+    pub severity: Option<String>,
+    pub link_path: Option<String>,
+    pub repo_path: Option<String>,
+    pub status: String, // open | done | snoozed
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ReminderStore {
+    pub reminders: Vec<Reminder>,
+}
+
 // Batch processing progress
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BatchProgress {
@@ -253,6 +273,44 @@ fn log_error(index_dir: &Path, operation: &str, file_path: Option<&str>, error_m
     if let Ok(json) = serde_json::to_string_pretty(&error_log) {
         let _ = fs::write(&error_log_file, json);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reminder helpers
+// ---------------------------------------------------------------------------
+
+fn reminders_path() -> std::path::PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| Path::new(".").to_path_buf())
+        .join(".wayfinder_reminders.json")
+}
+
+fn load_reminders() -> ReminderStore {
+    let path = reminders_path();
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(store) = serde_json::from_str::<ReminderStore>(&content) {
+            return store;
+        }
+    }
+    ReminderStore::default()
+}
+
+fn save_reminders(store: &ReminderStore) -> Result<(), String> {
+    let path = reminders_path();
+    let json = serde_json::to_string_pretty(store).map_err(|e| format!("Failed to serialize reminders: {}", e))?;
+    fs::write(&path, json).map_err(|e| format!("Failed to write reminders: {}", e))
+}
+
+fn now_string() -> String {
+    Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn new_id() -> String {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("rem-{}-{}", ts, rand::thread_rng().gen::<u32>())
 }
 
 // Pure Rust command handlers - no Python dependency
@@ -597,11 +655,13 @@ pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usiz
     let index_content = fs::read_to_string(&index_file).map_err(|e| format!("Failed to read index: {}", e))?;
     let index_data: IndexData = serde_json::from_str(&index_content).map_err(|e| format!("Failed to parse index: {}", e))?;
 
-    let files_to_process: Vec<FileEntry> = if let Some(max) = max_files {
+    let files_initial: Vec<FileEntry> = if let Some(max) = max_files {
         index_data.files.into_iter().take(max).collect()
     } else {
         index_data.files
     };
+
+    let (files_to_process, collapsed_groups, collapsed_files) = collapse_versions(files_initial);
 
     let client = reqwest::Client::new();
     let base = endpoint.unwrap_or_else(|| "http://localhost:5002".to_string());
@@ -716,7 +776,9 @@ pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usiz
         "skipped_count": skipped_count,
         "error_count": error_count,
         "total_files": embeddings.len(),
-        "message": format!("Generated {} embeddings ({} skipped, {} errors)", generated_count, skipped_count, error_count)
+        "message": format!("Generated {} embeddings ({} skipped, {} errors)", generated_count, skipped_count, error_count),
+        "collapsed_groups": collapsed_groups,
+        "collapsed_files": collapsed_files
     }))
 }
 
@@ -761,11 +823,12 @@ pub async fn generate_embeddings_azure(index_dir: String, max_files: Option<usiz
     let index_data: IndexData = serde_json::from_str(&index_content)
         .map_err(|e| format!("Failed to parse index: {}", e))?;
     // Apply max_files limit if specified
-    let files_to_process: Vec<FileEntry> = if let Some(max) = max_files {
+    let files_initial: Vec<FileEntry> = if let Some(max) = max_files {
         index_data.files.into_iter().take(max).collect()
     } else {
         index_data.files
     };
+    let (files_to_process, collapsed_groups, collapsed_files) = collapse_versions(files_initial);
     let total_files = files_to_process.len();
     let total_batches = (total_files + config_batch_size - 1) / config_batch_size;
     println!("[RUST] Processing {} files in {} batches of {}", total_files, total_batches, config_batch_size);
@@ -986,7 +1049,9 @@ pub async fn generate_embeddings_azure(index_dir: String, max_files: Option<usiz
         "skipped_count": skipped_count,
         "error_count": error_count,
         "total_files": new_embeddings.len(),
-        "message": format!("Generated {} new embeddings, {} from cache, {} skipped, {} errors", generated_count, cached_count, skipped_count, error_count)
+        "message": format!("Generated {} new embeddings, {} from cache, {} skipped, {} errors", generated_count, cached_count, skipped_count, error_count),
+        "collapsed_groups": collapsed_groups,
+        "collapsed_files": collapsed_files
     }))
 }
 
@@ -1017,11 +1082,13 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
     let index_content = fs::read_to_string(&index_file).map_err(|e| format!("Failed to read index: {}", e))?;
     let index_data: IndexData = serde_json::from_str(&index_content).map_err(|e| format!("Failed to parse index: {}", e))?;
 
-    let files_to_process: Vec<FileEntry> = if let Some(max) = max_files {
+    let files_initial: Vec<FileEntry> = if let Some(max) = max_files {
         index_data.files.into_iter().take(max).collect()
     } else {
         index_data.files
     };
+
+    let (files_to_process, collapsed_groups, collapsed_files) = collapse_versions(files_initial);
 
     // Load existing embeddings to support resume/skip
     let mut existing_embeddings: Vec<FileEmbedding> = Vec::new();
@@ -1288,7 +1355,9 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
         "embeddings_generated": generated_count,
         "cached_count": 0,
         "error_count": error_count,
-        "message": format!("Generated {} embeddings using GCP ({} errors).", generated_count, error_count)
+        "message": format!("Generated {} embeddings using GCP ({} errors).", generated_count, error_count),
+        "collapsed_groups": collapsed_groups,
+        "collapsed_files": collapsed_files
     }))
 }
 
@@ -1945,6 +2014,97 @@ pub async fn get_stats(index_dir: String) -> Result<serde_json::Value, String> {
         "has_clusters": has_clusters,
         "cluster_count": cluster_count
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Reminder commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_reminders(include_done: Option<bool>) -> Result<serde_json::Value, String> {
+    let store = load_reminders();
+    let include_done = include_done.unwrap_or(false);
+    let filtered: Vec<Reminder> = if include_done {
+        store.reminders
+    } else {
+        store.reminders.into_iter().filter(|r| r.status != "done").collect()
+    };
+
+    Ok(serde_json::json!({
+        "success": true,
+        "reminders": filtered,
+    }))
+}
+
+#[tauri::command]
+pub async fn add_reminder(
+    title: String,
+    due: Option<String>,
+    severity: Option<String>,
+    link_path: Option<String>,
+    repo_path: Option<String>,
+) -> Result<serde_json::Value, String> {
+    if title.trim().is_empty() {
+        return Err("Title required".to_string());
+    }
+
+    let mut store = load_reminders();
+    let now = now_string();
+    let reminder = Reminder {
+        id: new_id(),
+        title: title.trim().to_string(),
+        due,
+        severity,
+        link_path,
+        repo_path,
+        status: "open".to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    store.reminders.push(reminder.clone());
+    save_reminders(&store)?;
+
+    Ok(serde_json::json!({"success": true, "reminder": reminder}))
+}
+
+#[tauri::command]
+pub async fn update_reminder_status(id: String, status: String) -> Result<serde_json::Value, String> {
+    let mut store = load_reminders();
+    let mut found = false;
+    for r in store.reminders.iter_mut() {
+        if r.id == id {
+            r.status = status.clone();
+            r.updated_at = now_string();
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return Err("Reminder not found".to_string());
+    }
+    save_reminders(&store)?;
+    Ok(serde_json::json!({"success": true}))
+}
+
+#[tauri::command]
+pub async fn snooze_reminder(id: String, hours: i64) -> Result<serde_json::Value, String> {
+    let mut store = load_reminders();
+    let mut found = false;
+    for r in store.reminders.iter_mut() {
+        if r.id == id {
+            let future = Local::now() + chrono::Duration::hours(hours);
+            r.due = Some(future.format("%Y-%m-%d %H:%M:%S").to_string());
+            r.status = "snoozed".to_string();
+            r.updated_at = now_string();
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return Err("Reminder not found".to_string());
+    }
+    save_reminders(&store)?;
+    Ok(serde_json::json!({"success": true}))
 }
 
 /// Validate if index exists and is valid
@@ -3102,5 +3262,82 @@ pub async fn import_index(zip_path: String, target_dir: String) -> Result<bool, 
 // Add md5 helper that returns Digest for easy hex formatting
 fn md5_hash(s: &str) -> md5::Digest {
     md5::compute(s)
+}
+
+// ---------------------------------------------------------------------------
+// Utility: collapse versioned duplicates and prefer newest
+// ---------------------------------------------------------------------------
+
+fn normalize_stem(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let mut cleaned = lower
+        .replace(" copy", "")
+        .replace("- copy", "")
+        .replace(" copy", "")
+        .replace("(copy)", "")
+        .replace("(1)", "")
+        .replace("(2)", "")
+        .replace("(3)", "")
+        .replace("final", "")
+        .replace("draft", "")
+        .replace("backup", "")
+        .replace("bak", "")
+        .replace("old", "")
+        .replace("new", "")
+        .replace("v1", "")
+        .replace("v2", "")
+        .replace("v3", "");
+
+    let tokens: Vec<&str> = cleaned
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    if tokens.is_empty() {
+        cleaned.trim().to_string()
+    } else {
+        tokens.join("_")
+    }
+}
+
+fn collapse_versions(files: Vec<FileEntry>) -> (Vec<FileEntry>, usize, usize) {
+    let mut map: HashMap<String, FileEntry> = HashMap::new();
+    let mut groups = 0usize;
+    let mut collapsed = 0usize;
+
+    for f in files.into_iter() {
+        let stem = Path::new(&f.path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let key = normalize_stem(stem);
+
+        let existing = map.get(&key);
+        let newer = if let Some(e) = existing {
+            let mt_new = DateTime::parse_from_str(&f.modified, "%Y-%m-%d %H:%M:%S")
+                .or_else(|_| DateTime::parse_from_rfc3339(&f.modified))
+                .map(|d| d.timestamp())
+                .unwrap_or(0);
+            let mt_old = DateTime::parse_from_str(&e.modified, "%Y-%m-%d %H:%M:%S")
+                .or_else(|_| DateTime::parse_from_rfc3339(&e.modified))
+                .map(|d| d.timestamp())
+                .unwrap_or(0);
+            mt_new >= mt_old
+        } else {
+            true
+        };
+
+        if newer {
+            if existing.is_some() {
+                collapsed += 1;
+            }
+            map.insert(key.clone(), f);
+        } else {
+            collapsed += 1;
+        }
+    }
+
+    groups = map.len();
+    (map.into_values().collect(), groups, collapsed)
 }
 

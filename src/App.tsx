@@ -27,6 +27,18 @@ const FILE_TYPE_PRESETS = {
 type OperationStatus = "idle" | "running" | "complete" | "error";
 type ActiveSection = "status" | "scan" | "embed" | "cluster" | "search" | "timeline" | "git" | "nauti";
 
+interface Reminder {
+    id: string;
+    title: string;
+    due?: string;
+    severity?: string;
+    link_path?: string;
+    repo_path?: string;
+    status: string;
+    created_at: string;
+    updated_at: string;
+}
+
 interface ScanResult {
     files_scanned: number;
     total_size: number;
@@ -57,6 +69,11 @@ export default function App() {
     const [scanPath, setScanPath] = useState<string>("");
     const [selectedTypes, setSelectedTypes] = useState<string[]>(["Markdown"]);
     const [gitRepoPath, setGitRepoPath] = useState<string>("");
+
+    // Reminders
+    const [reminders, setReminders] = useState<Reminder[]>([]);
+    const [newReminderTitle, setNewReminderTitle] = useState("");
+    const [newReminderDays, setNewReminderDays] = useState<number>(1);
 
     // Status/Stats state
     const [indexStats, setIndexStats] = useState<IndexStats | null>(null);
@@ -144,6 +161,11 @@ export default function App() {
         document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
     }, [isDark]);
 
+    // Load reminders on mount
+    useEffect(() => {
+        loadReminders();
+    }, []);
+
     // Load stats on mount and when switching to status
     useEffect(() => {
         if (activeSection === "status" && indexPath) {
@@ -164,6 +186,39 @@ export default function App() {
         } catch (error) {
             console.log("No Azure config found");
             setHasExistingKey(false);
+        }
+    };
+
+    const addReminder = async () => {
+        if (!newReminderTitle.trim()) return;
+        const due = new Date(Date.now() + newReminderDays * 24 * 60 * 60 * 1000)
+            .toISOString()
+            .replace("T", " ")
+            .slice(0, 19);
+        try {
+            await tauriService.addReminder(newReminderTitle, due, undefined, undefined, gitRepoPath || undefined);
+            setNewReminderTitle("");
+            loadReminders();
+        } catch (e: any) {
+            setErrorMsg(e.toString());
+        }
+    };
+
+    const markReminderDone = async (id: string) => {
+        try {
+            await tauriService.updateReminderStatus(id, "done");
+            loadReminders();
+        } catch (e: any) {
+            setErrorMsg(e.toString());
+        }
+    };
+
+    const snoozeReminder = async (id: string, hours: number) => {
+        try {
+            await tauriService.snoozeReminder(id, hours);
+            loadReminders();
+        } catch (e: any) {
+            setErrorMsg(e.toString());
         }
     };
 
@@ -281,6 +336,15 @@ export default function App() {
             setIndexStats(stats);
         } catch (error) {
             console.error("Failed to load stats:", error);
+        }
+    };
+
+    const loadReminders = async () => {
+        try {
+            const res = await tauriService.listReminders(false);
+            setReminders(res.reminders || []);
+        } catch (e) {
+            console.error("Failed to load reminders", e);
         }
     };
 
@@ -738,6 +802,71 @@ export default function App() {
                 {activeSection === "status" && (
                     <section className="content-section">
                         <h2>📊 Index Status</h2>
+                        {/* Reminders panel */}
+                        <div className="reminders-panel" style={{ marginBottom: '1rem' }}>
+                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                                <input
+                                    type="text"
+                                    placeholder="Add a reminder..."
+                                    value={newReminderTitle}
+                                    onChange={(e) => setNewReminderTitle(e.target.value)}
+                                    style={{ flex: '1 1 240px' }}
+                                />
+                                <select value={newReminderDays} onChange={(e) => setNewReminderDays(parseInt(e.target.value))}>
+                                    <option value={1}>Tomorrow</option>
+                                    <option value={3}>+3 days</option>
+                                    <option value={7}>+7 days</option>
+                                </select>
+                                <button className="btn btn-secondary" onClick={addReminder}>➕ Save</button>
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '0.75rem' }}>
+                                {(() => {
+                                    const now = Date.now();
+                                    const important = reminders.filter(r => {
+                                        const dueTs = r.due ? Date.parse(r.due.replace(' ', 'T') + 'Z') : 0;
+                                        return (r.severity === 'high') || (dueTs && dueTs < now);
+                                    });
+                                    const later = reminders.filter(r => !important.includes(r));
+                                    const renderList = (items: Reminder[], label: string) => (
+                                        <div className="reminder-group" style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '0.75rem' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <h4 style={{ margin: 0 }}>{label}</h4>
+                                                <span style={{ color: 'var(--text-secondary)' }}>{items.length}</span>
+                                            </div>
+                                            {items.length === 0 ? (
+                                                <p style={{ color: 'var(--text-secondary)' }}>Nothing here.</p>
+                                            ) : (
+                                                <div className="reminder-list" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
+                                                    {items.map(r => (
+                                                        <div key={r.id} className="reminder-card" style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', padding: '0.5rem' }}>
+                                                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', alignItems: 'center' }}>
+                                                                <div>
+                                                                    <strong>{r.title}</strong>
+                                                                    {r.due && <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Due: {r.due}</div>}
+                                                                    {r.repo_path && <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Repo: {r.repo_path}</div>}
+                                                                </div>
+                                                                <div style={{ display: 'flex', gap: '0.25rem' }}>
+                                                                    <button className="btn btn-small" onClick={() => snoozeReminder(r.id, 24)}>+1d</button>
+                                                                    <button className="btn btn-small" onClick={() => snoozeReminder(r.id, 72)}>+3d</button>
+                                                                    <button className="btn btn-small" onClick={() => snoozeReminder(r.id, 168)}>+7d</button>
+                                                                    <button className="btn btn-small" onClick={() => markReminderDone(r.id)}>Done</button>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                    return (
+                                        <>
+                                            {renderList(important, 'Important')}
+                                            {renderList(later, 'Later')}
+                                        </>
+                                    );
+                                })()}
+                            </div>
+                        </div>
                         {!indexPath ? (
                             <div className="empty-state">
                                 <p>No index loaded. Go to <strong>Scan</strong> to create one.</p>
