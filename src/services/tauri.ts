@@ -159,8 +159,8 @@ export const tauriService = {
         return invoke("snooze_reminder", { id, hours });
     },
 
-    async classifyFiles(indexDir: string, labels: Record<string, string[]>, topN?: number): Promise<{ success: boolean; classified: any[] }> {
-        return invoke("classify_files", { indexDir, labels, topN });
+    async classifyFiles(indexDir: string, labels: Record<string, string[]>, topN?: number, rules?: { min_confidence?: number; ambiguity_delta?: number; include_patterns?: Record<string, string[]>; exclude_patterns?: Record<string, string[]> }): Promise<{ success: boolean; classified: any[] }> {
+        return invoke("classify_files", { indexDir, labels, topN, rules });
     },
 
     async buildViewPlan(classified: any[], viewRoot: string, preferJunction?: boolean, dryRun?: boolean): Promise<{ success: boolean; plan: any[]; applied: any[]; errors: string[] }> {

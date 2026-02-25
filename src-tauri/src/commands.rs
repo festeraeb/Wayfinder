@@ -105,6 +105,14 @@ pub struct ClassifiedFile {
     pub alternates: Vec<(String, f32)>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ClassificationRules {
+    pub min_confidence: Option<f32>,
+    pub ambiguity_delta: Option<f32>,
+    pub include_patterns: Option<HashMap<String, Vec<String>>>, // label -> patterns to force
+    pub exclude_patterns: Option<HashMap<String, Vec<String>>>, // label -> patterns to block
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MovePlanEntry {
     pub from: String,
@@ -2656,6 +2664,7 @@ pub async fn classify_files(
     index_dir: String,
     labels: HashMap<String, Vec<String>>,
     top_n: Option<usize>,
+    rules: Option<ClassificationRules>,
 ) -> Result<serde_json::Value, String> {
     let index_path = Path::new(&index_dir);
     let index_file = index_path.join("index.json");
@@ -2667,7 +2676,8 @@ pub async fn classify_files(
 
     let limit = top_n.unwrap_or(index_data.files.len());
     let files: Vec<FileEntry> = index_data.files.into_iter().take(limit).collect();
-    let classified = classify_files_with_labels(&files, &labels);
+    let rules = rules.unwrap_or_default();
+    let classified = classify_files_with_labels(&files, &labels, &rules);
 
     Ok(serde_json::json!({
         "success": true,
@@ -3460,7 +3470,11 @@ fn score_file(label: &str, tokens: &[String]) -> (f32, Vec<String>) {
     (score, reasons)
 }
 
-fn classify_files_with_labels(files: &[FileEntry], labels: &HashMap<String, Vec<String>>) -> Vec<ClassifiedFile> {
+fn classify_files_with_labels(
+    files: &[FileEntry],
+    labels: &HashMap<String, Vec<String>>,
+    rules: &ClassificationRules,
+) -> Vec<ClassifiedFile> {
     let mut out = Vec::new();
     for f in files {
         let tokens = tokenize_path(&f.path);
@@ -3475,6 +3489,29 @@ fn classify_files_with_labels(files: &[FileEntry], labels: &HashMap<String, Vec<
                 label_score += s;
                 reasons.extend(r);
             }
+
+            // Include patterns: if any explicit pattern matches path, boost strongly
+            if let Some(map) = &rules.include_patterns {
+                if let Some(pats) = map.get(label) {
+                    for pat in pats {
+                        if f.path.to_lowercase().contains(&pat.to_lowercase()) {
+                            label_score += 5.0;
+                            reasons.push(format!("include pattern hit: {}", pat));
+                        }
+                    }
+                }
+            }
+
+            // Exclude patterns: if match, zero the score
+            if let Some(map) = &rules.exclude_patterns {
+                if let Some(pats) = map.get(label) {
+                    if pats.iter().any(|p| f.path.to_lowercase().contains(&p.to_lowercase())) {
+                        label_score = 0.0;
+                        reasons.push("excluded by pattern".to_string());
+                    }
+                }
+            }
+
             if label_score > best.1 {
                 if best.1 > 0.0 {
                     alts.push((best.0.clone(), best.1));
@@ -3490,10 +3527,27 @@ fn classify_files_with_labels(files: &[FileEntry], labels: &HashMap<String, Vec<
         }
 
         alts.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut final_project = best.0.clone();
+        let mut final_conf = best.1;
+
+        if let Some(min) = rules.min_confidence {
+            if final_conf < min {
+                final_project = "unsorted".to_string();
+            }
+        }
+
+        if let Some(delta) = rules.ambiguity_delta {
+            if let Some(top_alt) = alts.first() {
+                if (final_conf - top_alt.1).abs() <= delta {
+                    final_project = "unsorted".to_string();
+                }
+            }
+        }
+
         out.push(ClassifiedFile {
             path: f.path.clone(),
-            project: best.0,
-            confidence: best.1,
+            project: final_project,
+            confidence: final_conf,
             reasons: best.2,
             alternates: alts.into_iter().take(3).collect(),
         });
