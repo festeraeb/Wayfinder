@@ -25,7 +25,7 @@ const FILE_TYPE_PRESETS = {
 };
 
 type OperationStatus = "idle" | "running" | "complete" | "error";
-type ActiveSection = "status" | "scan" | "embed" | "cluster" | "search" | "timeline" | "git" | "nauti";
+type ActiveSection = "status" | "scan" | "embed" | "cluster" | "search" | "timeline" | "git" | "nauti" | "org";
 
 interface Reminder {
     id: string;
@@ -37,6 +37,14 @@ interface Reminder {
     status: string;
     created_at: string;
     updated_at: string;
+}
+
+interface ClassifiedFile {
+    path: string;
+    project: string;
+    confidence: number;
+    reasons: string[];
+    alternates: [string, number][];
 }
 
 interface ScanResult {
@@ -74,6 +82,21 @@ export default function App() {
     const [reminders, setReminders] = useState<Reminder[]>([]);
     const [newReminderTitle, setNewReminderTitle] = useState("");
     const [newReminderDays, setNewReminderDays] = useState<number>(1);
+
+        // Org/classify
+        const [labelSpec, setLabelSpec] = useState<string>(`{
+    "projectA": ["sonar", "sniffer"],
+    "projectB": ["bag", "rosbag"]
+}`);
+        const [rulesSpec, setRulesSpec] = useState<string>(`{
+    "min_confidence": 0.8,
+    "ambiguity_delta": 0.3
+}`);
+        const [classified, setClassified] = useState<ClassifiedFile[]>([]);
+        const [viewRoot, setViewRoot] = useState<string>("Wayfinder/View");
+        const [viewPlan, setViewPlan] = useState<any[]>([]);
+        const [viewErrors, setViewErrors] = useState<string[]>([]);
+        const [viewDryRun, setViewDryRun] = useState<boolean>(true);
 
     // Status/Stats state
     const [indexStats, setIndexStats] = useState<IndexStats | null>(null);
@@ -235,6 +258,37 @@ export default function App() {
         } catch (error) {
             console.log("No GCP config found");
             setHasExistingGcpKey(false);
+        }
+    };
+
+    const handleClassify = async () => {
+        if (!indexPath) {
+            setErrorMsg("No index available. Scan first.");
+            return;
+        }
+        try {
+            const labels = JSON.parse(labelSpec);
+            const rules = rulesSpec.trim() ? JSON.parse(rulesSpec) : {};
+            const res = await tauriService.classifyFiles(indexPath, labels, undefined, rules);
+            setClassified(res.classified || []);
+            setErrorMsg("");
+        } catch (e: any) {
+            setErrorMsg("Classify failed: " + e.toString());
+        }
+    };
+
+    const handleBuildView = async () => {
+        if (!classified || classified.length === 0) {
+            setErrorMsg("Run classify first.");
+            return;
+        }
+        try {
+            const res = await tauriService.buildViewPlan(classified, viewRoot, true, viewDryRun);
+            setViewPlan(res.plan || []);
+            setViewErrors(res.errors || []);
+            setErrorMsg(res.success ? "" : "View plan completed with errors");
+        } catch (e: any) {
+            setErrorMsg("View plan failed: " + e.toString());
         }
     };
 
@@ -687,6 +741,7 @@ export default function App() {
         { id: "timeline", icon: "📅", label: "Timeline" },
         { id: "git", icon: "📎", label: "Git Clippy" },
         { id: "nauti", icon: "🧭", label: "Nauti-Clippy" },
+        { id: "org", icon: "🗃️", label: "Org" },
     ];
 
     return (
@@ -1650,6 +1705,108 @@ export default function App() {
                                         ))
                                     )}
                                 </div>
+                            </>
+                        )}
+                    </section>
+                )}
+
+                {/* Org Section */}
+                {activeSection === "org" && (
+                    <section className="content-section">
+                        <h2>🗃️ Organize Projects</h2>
+                        <p className="section-desc">Classify files into projects and build a reversible view with links.</p>
+
+                        {!indexPath ? (
+                            <div className="empty-state">
+                                <p>No index available. Please scan a folder first.</p>
+                                <button className="btn btn-primary" onClick={() => setActiveSection("scan")}>
+                                    📁 Go to Scan
+                                </button>
+                            </div>
+                        ) : (
+                            <>
+                                <div className="form-group">
+                                    <label>Labels (JSON: {`{ "projectA": ["foo"], "projectB": ["bar"] }`})</label>
+                                    <textarea
+                                        className="folder-input"
+                                        rows={6}
+                                        value={labelSpec}
+                                        onChange={(e) => setLabelSpec(e.target.value)}
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label>Rules (JSON)</label>
+                                    <textarea
+                                        className="folder-input"
+                                        rows={5}
+                                        value={rulesSpec}
+                                        onChange={(e) => setRulesSpec(e.target.value)}
+                                    />
+                                    <small>Use min_confidence, ambiguity_delta, include_patterns, exclude_patterns.</small>
+                                </div>
+                                <div className="action-row" style={{ gap: '0.75rem' }}>
+                                    <button className="btn btn-primary" onClick={handleClassify}>🔍 Classify</button>
+                                    <button className="btn btn-secondary" onClick={handleBuildView} disabled={classified.length === 0}>🧭 Build View</button>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                        <input type="checkbox" checked={viewDryRun} onChange={(e) => setViewDryRun(e.target.checked)} /> Dry run
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={viewRoot}
+                                        onChange={(e) => setViewRoot(e.target.value)}
+                                        style={{ maxWidth: '320px' }}
+                                        placeholder="Wayfinder/View"
+                                    />
+                                </div>
+
+                                {classified.length > 0 && (
+                                    <div className="table" style={{ marginTop: '1rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '0.75rem' }}>
+                                        <h4>Classified ({classified.length})</h4>
+                                        <div style={{ maxHeight: '320px', overflow: 'auto' }}>
+                                            {classified.map((c, i) => (
+                                                <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 160px 80px', gap: '0.5rem', padding: '0.35rem 0', borderBottom: '1px solid var(--border-color)' }}>
+                                                    <div style={{ wordBreak: 'break-all' }}>{c.path}</div>
+                                                    <div>
+                                        <strong>{c.project}</strong>
+                                                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Conf: {c.confidence.toFixed(2)}</div>
+                                                    </div>
+                                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                                                        {c.alternates && c.alternates.length > 0 && (
+                                                            <div>Alt: {c.alternates[0][0]} ({c.alternates[0][1].toFixed(2)})</div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {viewPlan.length > 0 && (
+                                    <div className="table" style={{ marginTop: '1rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '0.75rem' }}>
+                                        <h4>View Plan ({viewPlan.length}) {viewDryRun ? '(dry-run)' : ''}</h4>
+                                        <div style={{ maxHeight: '240px', overflow: 'auto' }}>
+                                            {viewPlan.slice(0, 200).map((p, i) => (
+                                                <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 90px', gap: '0.5rem', padding: '0.35rem 0', borderBottom: '1px solid var(--border-color)' }}>
+                                                    <div style={{ wordBreak: 'break-all' }}>{p.from}</div>
+                                                    <div style={{ wordBreak: 'break-all' }}>{p.to}</div>
+                                                    <div>{p.link_type || 'planned'}</div>
+                                                </div>
+                                            ))}
+                                            {viewPlan.length > 200 && <div style={{ color: 'var(--text-secondary)' }}>Showing first 200...</div>}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {viewErrors.length > 0 && (
+                                    <div className="error-message" style={{ marginTop: '0.75rem' }}>
+                                        <h4>Errors</h4>
+                                        <ul>
+                                            {viewErrors.map((e, i) => (
+                                                <li key={i}>{e}</li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
                             </>
                         )}
                     </section>

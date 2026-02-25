@@ -3364,7 +3364,7 @@ fn md5_hash(s: &str) -> md5::Digest {
 
 fn normalize_stem(name: &str) -> String {
     let lower = name.to_lowercase();
-    let mut cleaned = lower
+    let cleaned = lower
         .replace(" copy", "")
         .replace("- copy", "")
         .replace(" copy", "")
@@ -3396,7 +3396,6 @@ fn normalize_stem(name: &str) -> String {
 
 fn collapse_versions(files: Vec<FileEntry>) -> (Vec<FileEntry>, usize, usize) {
     let mut map: HashMap<String, FileEntry> = HashMap::new();
-    let mut groups = 0usize;
     let mut collapsed = 0usize;
 
     for f in files.into_iter() {
@@ -3431,7 +3430,7 @@ fn collapse_versions(files: Vec<FileEntry>) -> (Vec<FileEntry>, usize, usize) {
         }
     }
 
-    groups = map.len();
+    let groups = map.len();
     (map.into_values().collect(), groups, collapsed)
 }
 
@@ -3528,7 +3527,7 @@ fn classify_files_with_labels(
 
         alts.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let mut final_project = best.0.clone();
-        let mut final_conf = best.1;
+        let final_conf = best.1;
 
         if let Some(min) = rules.min_confidence {
             if final_conf < min {
