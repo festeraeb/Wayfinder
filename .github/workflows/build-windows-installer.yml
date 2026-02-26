@@ -1,0 +1,43 @@
+name: Build and Release Windows Installer
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build Tauri app
+        run: npm run tauri build
+
+      - name: Upload Windows installer (EXE)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wayfinder_Windows_Installer_EXE
+          path: src-tauri/target/release/bundle/nsis/*.exe
+
+      - name: Upload Windows installer (MSI)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wayfinder_Windows_Installer_MSI
+          path: src-tauri/target/release/bundle/msi/*.msi

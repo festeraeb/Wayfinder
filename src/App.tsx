@@ -84,10 +84,8 @@ export default function App() {
     const [newReminderDays, setNewReminderDays] = useState<number>(1);
 
         // Org/classify
-        const [labelSpec, setLabelSpec] = useState<string>(`{
-    "projectA": ["sonar", "sniffer"],
-    "projectB": ["bag", "rosbag"]
-}`);
+        const [labelInput, setLabelInput] = useState<string>("projectA: sonar, sniffer, cesarops, Drift, garmin, drone, rsd\nprojectB: bag, bagfile, pdf, redaction, masking, magnetic");
+        const [labelSpec, setLabelSpec] = useState<string>("");
         const [rulesSpec, setRulesSpec] = useState<string>(`{
     "min_confidence": 0.8,
     "ambiguity_delta": 0.3
@@ -185,6 +183,15 @@ export default function App() {
     // Error state
     const [errorMsg, setErrorMsg] = useState<string>("");
 
+    useEffect(() => {
+        try {
+            refreshLabelSpec(labelInput);
+        } catch (e: any) {
+            setErrorMsg(`Labels are invalid: ${e.message || e.toString()}`);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
     // Theme setup
     useEffect(() => {
         document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
@@ -267,14 +274,59 @@ export default function App() {
         }
     };
 
+    const parseLabelInput = (input: string): Record<string, string[]> => {
+        const labels: Record<string, string[]> = {};
+        const lines = input.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        if (lines.length === 0) {
+            throw new Error("Enter at least one project with terms.");
+        }
+
+        for (const line of lines) {
+            const [projectPart, termsPart] = line.split(":");
+            if (!projectPart || !termsPart) {
+                throw new Error(`Use "project: term1, term2" format (got "${line}")`);
+            }
+            const project = projectPart.trim();
+            const terms = termsPart.split(",").map(t => t.trim()).filter(Boolean);
+            if (!project) {
+                throw new Error("Project name is missing.");
+            }
+            if (terms.length === 0) {
+                throw new Error(`Add at least one term for ${project}.`);
+            }
+            labels[project] = terms;
+        }
+
+        return labels;
+    };
+
+    const refreshLabelSpec = (input: string): Record<string, string[]> => {
+        const labels = parseLabelInput(input);
+        setLabelSpec(JSON.stringify(labels, null, 2));
+        return labels;
+    };
+
     const handleClassify = async () => {
         if (!indexPath) {
             setErrorMsg("No index available. Scan first.");
             return;
         }
         try {
-            const labels = JSON.parse(labelSpec);
-            const rules = rulesSpec.trim() ? JSON.parse(rulesSpec) : {};
+            let labels: Record<string, string[]>;
+            try {
+                labels = refreshLabelSpec(labelInput);
+            } catch (parseErr: any) {
+                setErrorMsg("Labels are invalid: " + (parseErr?.message || parseErr.toString()));
+                return;
+            }
+
+            let rules: any = {};
+            try {
+                rules = rulesSpec.trim() ? JSON.parse(rulesSpec) : {};
+            } catch (ruleErr: any) {
+                setErrorMsg("Rules JSON is invalid: " + (ruleErr?.message || ruleErr.toString()));
+                return;
+            }
             const res = await tauriService.classifyFiles(
                 indexPath,
                 labels,
@@ -1761,14 +1813,35 @@ export default function App() {
                             </div>
                         ) : (
                             <>
-                                <div className="form-group">
-                                    <label>Labels (JSON: {`{ "projectA": ["foo"], "projectB": ["bar"] }`})</label>
+                                <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                    <label>Projects and terms (one line each: project: term1, term2)</label>
                                     <textarea
                                         className="folder-input"
-                                        rows={6}
-                                        value={labelSpec}
-                                        onChange={(e) => setLabelSpec(e.target.value)}
+                                        rows={4}
+                                        value={labelInput}
+                                        onChange={(e) => setLabelInput(e.target.value)}
+                                        placeholder="projectA: sonar, sniffer, cesarops, Drift, garmin, drone, rsd"
                                     />
+                                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                                        <button
+                                            className="btn btn-secondary"
+                                            type="button"
+                                            onClick={() => {
+                                                try {
+                                                    refreshLabelSpec(labelInput);
+                                                    setErrorMsg("");
+                                                } catch (e: any) {
+                                                    setErrorMsg(`Labels are invalid: ${e.message || e.toString()}`);
+                                                }
+                                            }}
+                                        >
+                                            Format & validate
+                                        </button>
+                                        <small>Type terms separated by comma + space; we format the JSON for you.</small>
+                                    </div>
+                                    {labelSpec && (
+                                        <pre style={{ background: 'var(--panel)', padding: '0.5rem', borderRadius: 'var(--radius-sm)', margin: 0, overflow: 'auto' }}>{labelSpec}</pre>
+                                    )}
                                 </div>
                                 <div className="form-group">
                                     <label>Rules (JSON)</label>

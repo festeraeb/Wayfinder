@@ -32,6 +32,7 @@ fn main() {
             commands::load_gcp_config,
             commands::load_provider_config,
             commands::get_clusters_data,
+            commands::classify_files,
             // Progress and error tracking
             commands::get_embedding_progress,
             commands::cancel_embedding,
