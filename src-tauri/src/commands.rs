@@ -9,6 +9,16 @@ use rand::Rng;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use std::time::{SystemTime, UNIX_EPOCH};
+use regex::Regex;
+
+// Language-specific reference patterns
+static TS_IMPORT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"import[^'\"]*[\'\"](?P<p>[^'\"]+)[\'\"]"#).unwrap());
+static TS_REQUIRE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"require\([\'\"](?P<p>[^'\"]+)[\'\"]\)"#).unwrap());
+static PY_FROM_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"from\s+(?P<p>[\w\.]+)\s+import"#).unwrap());
+static PY_IMPORT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"import\s+(?P<p>[\w\.]+)"#).unwrap());
+static RUST_USE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"use\s+(?P<p>[\w:]+)"#).unwrap());
+static RUST_MOD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"mod\s+(?P<p>[\w_]+);"#).unwrap());
+static CPP_INCLUDE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"#include\s+[<\"](?P<p>[^>\"]+)[>\"]"#).unwrap());
 
 // Import git_assistant module from crate root
 use crate::git_assistant;
@@ -118,6 +128,48 @@ pub struct MovePlanEntry {
     pub from: String,
     pub to: String,
     pub link_type: String, // junction | symlink | hardlink | copy
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct RefIndex {
+    pub refs: HashMap<String, Vec<String>>,       // target -> referrers
+    pub basename_map: HashMap<String, Vec<String>>, // basename -> targets
+    pub built_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct Neighbor {
+    pub path: String,
+    pub score: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct FileInsight {
+    pub path: String,
+    pub imports: Vec<String>,
+    pub mentions: Vec<String>,
+    pub semantic_neighbors: Vec<Neighbor>,
+    pub keywords: Vec<String>,
+    pub score: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct MoveAction {
+    pub action: String,             // move | create_shim | delete
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub path: Option<String>,
+    pub shim_content: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct MovePlan {
+    pub plan_id: String,
+    pub generated_at: String,
+    pub target_root: String,
+    pub steps: Vec<MoveAction>,
+    pub revert_steps: Vec<MoveAction>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -1781,6 +1833,231 @@ fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     1.0 - similarity
 }
 
+// ---------------------------------------------------------------------------
+// Reference indexing and reversible move planning
+// ---------------------------------------------------------------------------
+
+fn load_index_data(index_dir: &str) -> Result<(IndexData, PathBuf), String> {
+    let index_path = Path::new(index_dir).join("index.json");
+    if !index_path.exists() {
+        return Err("Index not found. Please scan a directory first.".to_string());
+    }
+    let content = fs::read_to_string(&index_path)
+        .map_err(|e| format!("Failed to read index: {}", e))?;
+    let index_data: IndexData = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse index: {}", e))?;
+    Ok((index_data, index_path))
+}
+
+fn resolve_candidate(raw: &str, from: &Path, index_files: &[FileEntry]) -> Option<PathBuf> {
+    // Relative paths like ./foo or ../bar
+    if raw.starts_with('.') {
+        let mut cand = from.join(raw);
+        // try with same extension
+        if !cand.exists() {
+            if let Some(ext) = from.extension() {
+                cand.set_extension(ext);
+            }
+        }
+        if cand.exists() {
+            return Some(cand);
+        }
+    }
+
+    // Absolute-like or module names: try basename/stem matches
+    let raw_norm = raw.replace('\\', "/");
+    for f in index_files {
+        if raw_norm.ends_with(&f.name) || raw_norm.ends_with(&f.path) || raw_norm == f.name || raw_norm == f.path {
+            return Some(PathBuf::from(&f.path));
+        }
+        let stem = Path::new(&f.name).file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if !stem.is_empty() && (raw_norm == stem || raw_norm.ends_with(stem)) {
+            return Some(PathBuf::from(&f.path));
+        }
+    }
+    None
+}
+
+fn extract_refs(index_data: &IndexData) -> RefIndex {
+    let mut refs: HashMap<String, Vec<String>> = HashMap::new();
+    let mut basename_map: HashMap<String, Vec<String>> = HashMap::new();
+
+    for entry in &index_data.files {
+        let path = PathBuf::from(&entry.path);
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let text = fs::read_to_string(&entry.path).unwrap_or_default();
+
+        let mut push_ref = |target: PathBuf| {
+            let key = target.to_string_lossy().to_string();
+            refs.entry(key.clone()).or_default().push(entry.path.clone());
+            if let Some(base) = target.file_name().and_then(|b| b.to_str()) {
+                basename_map.entry(base.to_string()).or_default().push(key);
+            }
+        };
+
+        for cap in TS_IMPORT_RE.captures_iter(&text) {
+            if let Some(raw) = cap.name("p") {
+                if let Some(target) = resolve_candidate(raw.as_str(), parent, &index_data.files) {
+                    push_ref(target);
+                }
+            }
+        }
+        for cap in TS_REQUIRE_RE.captures_iter(&text) {
+            if let Some(raw) = cap.name("p") {
+                if let Some(target) = resolve_candidate(raw.as_str(), parent, &index_data.files) {
+                    push_ref(target);
+                }
+            }
+        }
+        for cap in PY_FROM_RE.captures_iter(&text) {
+            if let Some(raw) = cap.name("p") {
+                if let Some(target) = resolve_candidate(raw.as_str(), parent, &index_data.files) {
+                    push_ref(target);
+                }
+            }
+        }
+        for cap in PY_IMPORT_RE.captures_iter(&text) {
+            if let Some(raw) = cap.name("p") {
+                if let Some(target) = resolve_candidate(raw.as_str(), parent, &index_data.files) {
+                    push_ref(target);
+                }
+            }
+        }
+        for cap in RUST_USE_RE.captures_iter(&text) {
+            if let Some(raw) = cap.name("p") {
+                if let Some(target) = resolve_candidate(raw.as_str(), parent, &index_data.files) {
+                    push_ref(target);
+                }
+            }
+        }
+        for cap in RUST_MOD_RE.captures_iter(&text) {
+            if let Some(raw) = cap.name("p") {
+                if let Some(target) = resolve_candidate(raw.as_str(), parent, &index_data.files) {
+                    push_ref(target);
+                }
+            }
+        }
+        for cap in CPP_INCLUDE_RE.captures_iter(&text) {
+            if let Some(raw) = cap.name("p") {
+                if let Some(target) = resolve_candidate(raw.as_str(), parent, &index_data.files) {
+                    push_ref(target);
+                }
+            }
+        }
+    }
+
+    // Deduplicate and sort
+    for v in refs.values_mut() {
+        v.sort();
+        v.dedup();
+    }
+    for v in basename_map.values_mut() {
+        v.sort();
+        v.dedup();
+    }
+
+    RefIndex {
+        refs,
+        basename_map,
+        built_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    }
+}
+
+fn load_ref_index(index_dir: &str) -> Result<RefIndex, String> {
+    let ref_path = Path::new(index_dir).join("ref_index.json");
+    if !ref_path.exists() {
+        return Err("Reference index not found".to_string());
+    }
+    let content = fs::read_to_string(&ref_path).map_err(|e| format!("Failed to read ref index: {}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse ref index: {}", e))
+}
+
+fn save_ref_index(index_dir: &str, ref_index: &RefIndex) -> Result<(), String> {
+    let ref_path = Path::new(index_dir).join("ref_index.json");
+    let content = serde_json::to_string_pretty(ref_index).map_err(|e| e.to_string())?;
+    fs::write(&ref_path, content).map_err(|e| format!("Failed to write ref index: {}", e))
+}
+
+fn extract_keywords_from_name(path: &str) -> Vec<String> {
+    let base = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let re = Regex::new(r"[A-Za-z0-9]+").unwrap();
+    re.find_iter(base)
+        .map(|m| m.as_str().to_lowercase())
+        .collect()
+}
+
+fn find_semantic_neighbors(target: &str, embeddings: &EmbeddingsData, top_k: usize) -> Vec<Neighbor> {
+    let mut out = Vec::new();
+    let target_vec = embeddings.embeddings.iter().find(|e| e.path == target);
+    if let Some(t) = target_vec {
+        for emb in &embeddings.embeddings {
+            if emb.path == t.path {
+                continue;
+            }
+            let dist = cosine_distance(&t.embedding, &emb.embedding);
+            let score = 1.0 - dist;
+            out.push(Neighbor { path: emb.path.clone(), score });
+        }
+        out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        out.truncate(top_k);
+    }
+    out
+}
+
+fn load_embeddings(index_dir: &str) -> Option<EmbeddingsData> {
+    let embeddings_file = Path::new(index_dir).join("embeddings.json");
+    if !embeddings_file.exists() {
+        return None;
+    }
+    if let Ok(content) = fs::read_to_string(&embeddings_file) {
+        if let Ok(data) = serde_json::from_str::<EmbeddingsData>(&content) {
+            return Some(data);
+        }
+    }
+    None
+}
+
+fn safe_read_prefix(path: &str, bytes: usize) -> String {
+    if let Ok(mut f) = fs::File::open(path) {
+        use std::io::Read;
+        let mut buf = vec![0u8; bytes];
+        if let Ok(n) = f.read(&mut buf) {
+            return String::from_utf8_lossy(&buf[..n]).to_string();
+        }
+    }
+    String::new()
+}
+
+fn default_shim_content(from: &Path, to: &Path) -> (String, String) {
+    let ext = from.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "ts" | "tsx" | "js" | "jsx" => (format!("// Moved to {}\nexport * from \"{}\";\n", to.display(), to.display()), "ts".to_string()),
+        "py" => (format!("# Moved to {}\nfrom {} import *  # shim\n", to.display(), to.display()), "py".to_string()),
+        "rs" => (format!("// Moved to {}\npub use {}::*;\n", to.display(), to.display()), "rs".to_string()),
+        "h" | "hpp" | "hh" | "hxx" => (format!("// Moved to {}\n#include \"{}\"\n", to.display(), to.display()), "cpp".to_string()),
+        _ => (format!("// Moved to {}\n", to.display()), "txt".to_string()),
+    }
+}
+
+fn append_move_history(index_dir: &str, plan: &MovePlan) {
+    let history_path = Path::new(index_dir).join("move_history.json");
+    let mut history: Vec<MovePlan> = if history_path.exists() {
+        fs::read_to_string(&history_path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    history.push(plan.clone());
+    if let Ok(content) = serde_json::to_string_pretty(&history) {
+        let _ = fs::write(&history_path, content);
+    }
+}
+
 /// Search indexed files by query string
 #[tauri::command]
 pub async fn search(
@@ -2665,6 +2942,12 @@ pub async fn classify_files(
     labels: HashMap<String, Vec<String>>,
     top_n: Option<usize>,
     rules: Option<ClassificationRules>,
+    smart_llm: Option<bool>,
+    llm_model: Option<String>,
+    llm_endpoint: Option<String>,
+    llm_limit: Option<usize>,
+    llm_min_score: Option<f32>,
+    llm_top_alternates: Option<usize>,
 ) -> Result<serde_json::Value, String> {
     let index_path = Path::new(&index_dir);
     let index_file = index_path.join("index.json");
@@ -2677,7 +2960,64 @@ pub async fn classify_files(
     let limit = top_n.unwrap_or(index_data.files.len());
     let files: Vec<FileEntry> = index_data.files.into_iter().take(limit).collect();
     let rules = rules.unwrap_or_default();
-    let classified = classify_files_with_labels(&files, &labels, &rules);
+    let mut classified = classify_files_with_labels(&files, &labels, &rules);
+
+    // Optional LLM refinement for ambiguous/low-confidence files
+    if smart_llm.unwrap_or(false) {
+        let endpoint = llm_endpoint.unwrap_or_else(|| "http://localhost:5001".to_string());
+        let model = llm_model.unwrap_or_else(|| "qwen2.5-coder-14b-instruct".to_string());
+        let llm_limit = llm_limit.unwrap_or(15).max(0);
+        let min_score = llm_min_score.unwrap_or(1.0);
+        let top_alts = llm_top_alternates.unwrap_or(2).max(0);
+        let allowed_labels: Vec<String> = labels.keys().cloned().collect();
+        let mut refined = 0usize;
+
+        for cf in classified.iter_mut() {
+            if refined >= llm_limit {
+                break;
+            }
+
+            let alt_gap = cf
+                .alternates
+                .get(0)
+                .map(|a| (cf.confidence - a.1).abs())
+                .unwrap_or(f32::MAX);
+            let ambiguous = alt_gap < rules.ambiguity_delta.unwrap_or(0.4);
+            let low_conf = cf.confidence < min_score;
+            let unsorted = cf.project == "unsorted";
+
+            if !(ambiguous || low_conf || unsorted) {
+                continue;
+            }
+
+            let alt_labels: Vec<String> = cf
+                .alternates
+                .iter()
+                .take(top_alts as usize)
+                .map(|a| a.0.clone())
+                .collect();
+
+            if let Some((label, reason)) = refine_classification_with_llm(
+                cf,
+                &allowed_labels,
+                &alt_labels,
+                &endpoint,
+                &model,
+            )
+            .await
+            {
+                if allowed_labels.contains(&label) {
+                    cf.project = label.clone();
+                    cf.reasons.push(format!("LLM refine: {}", reason));
+                    cf.confidence = cf.confidence.max(min_score + 0.1);
+                } else {
+                    cf.reasons.push(format!("LLM refine returned out-of-set label '{}'; kept {}", label, cf.project));
+                }
+            }
+
+            refined += 1;
+        }
+    }
 
     Ok(serde_json::json!({
         "success": true,
@@ -3469,6 +3809,70 @@ fn score_file(label: &str, tokens: &[String]) -> (f32, Vec<String>) {
     (score, reasons)
 }
 
+/// Use an external chat-completion (llama.cpp/OpenAI-compatible) to refine the label choice.
+async fn refine_classification_with_llm(
+    file: &ClassifiedFile,
+    allowed_labels: &[String],
+    alt_labels: &[String],
+    endpoint: &str,
+    model: &str,
+) -> Option<(String, String)> {
+    let client = reqwest::Client::new();
+    let base = endpoint.trim_end_matches('/');
+    let url = format!("{}/v1/chat/completions", base);
+
+    let content = fs::read_to_string(&file.path).ok()?;
+    let snippet: String = content.chars().take(4000).collect();
+
+    let mut label_list: Vec<String> = allowed_labels.to_vec();
+    label_list.extend_from_slice(alt_labels);
+    label_list.sort();
+    label_list.dedup();
+
+    let user_prompt = format!(
+        "Choose ONE label from this list: {}.\nCurrent guess: {}. Alternates: {:?}.\nFile path: {}\nContent snippet (truncated):\n{}\nReturn strict JSON: {{\"label\":<label>, \"reason\":<short>}}."
+        ,
+        label_list.join(", "),
+        file.project,
+        file.alternates,
+        file.path,
+        snippet
+    );
+
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a precise file classifier. Respond ONLY with compact JSON."},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.2,
+        "max_tokens": 200
+    });
+
+    let resp = client.post(&url).json(&payload).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let text = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+
+    let cleaned = text.trim().trim_matches('`').trim();
+    let parsed: serde_json::Value = serde_json::from_str(cleaned).ok()?;
+    let label = parsed.get("label").and_then(|l| l.as_str()).unwrap_or("").trim().to_string();
+    let reason = parsed.get("reason").and_then(|l| l.as_str()).unwrap_or("").trim().to_string();
+
+    if label.is_empty() {
+        return None;
+    }
+    Some((label, if reason.is_empty() { "LLM selected label".to_string() } else { reason }))
+}
+
 fn classify_files_with_labels(
     files: &[FileEntry],
     labels: &HashMap<String, Vec<String>>,
@@ -3618,5 +4022,292 @@ fn create_link(from: &Path, to: &Path, prefer_junction: bool) -> Result<String, 
     std::fs::copy(from, to)
         .map(|_| "copy".to_string())
         .map_err(|e| format!("Failed to copy {:?} -> {:?}: {}", from, to, e))
+}
+
+// ---------------------------------------------------------------------------
+// New commands: reference index, cluster insight, reversible move planning
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn build_ref_index(index_dir: String) -> Result<serde_json::Value, String> {
+    let (index_data, _) = load_index_data(&index_dir)?;
+    let ref_index = extract_refs(&index_data);
+    save_ref_index(&index_dir, &ref_index)?;
+    Ok(serde_json::json!({
+        "success": true,
+        "built_at": ref_index.built_at,
+        "refs": ref_index.refs.len(),
+    }))
+}
+
+#[tauri::command]
+pub async fn analyze_cluster(
+    files: Vec<String>,
+    index_dir: String,
+    include_semantic: bool,
+) -> Result<serde_json::Value, String> {
+    let (index_data, _) = load_index_data(&index_dir)?;
+    let ref_index = load_ref_index(&index_dir).unwrap_or_else(|_| extract_refs(&index_data));
+    let embeddings = if include_semantic { load_embeddings(&index_dir) } else { None };
+
+    let mut insights: Vec<FileInsight> = Vec::new();
+    for path in files {
+        let mut imports = ref_index.refs.get(&path).cloned().unwrap_or_default();
+        imports.sort();
+        imports.dedup();
+
+        let base = Path::new(&path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        let mut mentions = Vec::new();
+        for f in &index_data.files {
+            if f.path == path {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(&f.path) {
+                if !base.is_empty() && content.contains(&base) {
+                    mentions.push(f.path.clone());
+                }
+            }
+        }
+        mentions.sort();
+        mentions.dedup();
+
+        let semantic_neighbors = if let (true, Some(emb)) = (include_semantic, &embeddings) {
+            find_semantic_neighbors(&path, emb, 5)
+        } else {
+            Vec::new()
+        };
+
+        let keywords = extract_keywords_from_name(&path);
+        let score = imports.len() as f32 + (semantic_neighbors.first().map(|n| n.score).unwrap_or(0.0));
+
+        insights.push(FileInsight {
+            path: path.clone(),
+            imports,
+            mentions,
+            semantic_neighbors,
+            keywords,
+            score,
+        });
+    }
+
+    Ok(serde_json::json!(insights))
+}
+
+fn generate_plan_id() -> String {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let rand: u32 = rand::thread_rng().gen();
+    format!("plan-{}-{:08x}", ts, rand)
+}
+
+fn ensure_parent(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create {:?}: {}", parent, e))?
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn plan_moves(
+    target_root: String,
+    files: Vec<String>,
+    strategy: String,
+) -> Result<serde_json::Value, String> {
+    let plan_id = generate_plan_id();
+    let mut steps: Vec<MoveAction> = Vec::new();
+    let mut revert_steps: Vec<MoveAction> = Vec::new();
+
+    for from in files {
+        let from_path = PathBuf::from(&from);
+        let fname = from_path.file_name().and_then(|s| s.to_str()).unwrap_or("moved");
+        let to_path = Path::new(&target_root).join(fname);
+        let (shim_content, _lang) = default_shim_content(&from_path, &to_path);
+
+        steps.push(MoveAction {
+            action: "move".to_string(),
+            from: Some(from.clone()),
+            to: Some(to_path.to_string_lossy().to_string()),
+            path: None,
+            shim_content: None,
+            note: Some(strategy.clone()),
+        });
+
+        steps.push(MoveAction {
+            action: "create_shim".to_string(),
+            from: None,
+            to: None,
+            path: Some(from.clone()),
+            shim_content: Some(shim_content.clone()),
+            note: Some("shim".to_string()),
+        });
+
+        revert_steps.push(MoveAction {
+            action: "delete".to_string(),
+            from: None,
+            to: None,
+            path: Some(from.clone()),
+            shim_content: None,
+            note: Some("remove shim".to_string()),
+        });
+        revert_steps.push(MoveAction {
+            action: "move".to_string(),
+            from: Some(to_path.to_string_lossy().to_string()),
+            to: Some(from.clone()),
+            path: None,
+            shim_content: None,
+            note: Some("revert".to_string()),
+        });
+    }
+
+    let plan = MovePlan {
+        plan_id: plan_id.clone(),
+        generated_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        target_root,
+        steps,
+        revert_steps,
+    };
+
+    Ok(serde_json::to_value(plan).map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
+pub async fn apply_move_plan(index_dir: String, plan: MovePlan) -> Result<serde_json::Value, String> {
+    let mut errors: Vec<String> = Vec::new();
+
+    for step in &plan.steps {
+        match step.action.as_str() {
+            "move" => {
+                if let (Some(from), Some(to)) = (&step.from, &step.to) {
+                    let from_path = PathBuf::from(from);
+                    let to_path = PathBuf::from(to);
+                    if let Err(e) = ensure_parent(&to_path) {
+                        errors.push(e);
+                        continue;
+                    }
+                    if let Err(e) = fs::rename(&from_path, &to_path) {
+                        errors.push(format!("Failed to move {:?} -> {:?}: {}", from_path, to_path, e));
+                    }
+                }
+            }
+            "create_shim" => {
+                if let (Some(path), Some(content)) = (&step.path, &step.shim_content) {
+                    let shim_path = PathBuf::from(path);
+                    if let Err(e) = ensure_parent(&shim_path) {
+                        errors.push(e);
+                        continue;
+                    }
+                    if let Err(e) = fs::write(&shim_path, content) {
+                        errors.push(format!("Failed to write shim {:?}: {}", shim_path, e));
+                    }
+                }
+            }
+            "delete" => {
+                if let Some(path) = &step.path {
+                    let p = PathBuf::from(path);
+                    if p.exists() {
+                        if let Err(e) = fs::remove_file(&p) {
+                            errors.push(format!("Failed to delete {:?}: {}", p, e));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    append_move_history(&index_dir, &plan);
+
+    Ok(serde_json::json!({
+        "success": errors.is_empty(),
+        "errors": errors,
+        "applied_plan": plan,
+    }))
+}
+
+#[tauri::command]
+pub async fn list_move_history(index_dir: String) -> Result<serde_json::Value, String> {
+    let history_path = Path::new(&index_dir).join("move_history.json");
+    if history_path.exists() {
+        if let Ok(content) = fs::read_to_string(&history_path) {
+            if let Ok(history) = serde_json::from_str::<Vec<MovePlan>>(&content) {
+                return Ok(serde_json::json!(history));
+            }
+        }
+    }
+    Ok(serde_json::json!(Vec::<MovePlan>::new()))
+}
+
+#[tauri::command]
+pub async fn undo_move_plan(index_dir: String, plan_id: String) -> Result<serde_json::Value, String> {
+    let history_path = Path::new(&index_dir).join("move_history.json");
+    let mut history: Vec<MovePlan> = if history_path.exists() {
+        fs::read_to_string(&history_path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let plan_opt = history.iter().find(|p| p.plan_id == plan_id).cloned();
+    if plan_opt.is_none() {
+        return Err("Plan not found".to_string());
+    }
+    let plan = plan_opt.unwrap();
+    let mut errors: Vec<String> = Vec::new();
+
+    for step in &plan.revert_steps {
+        match step.action.as_str() {
+            "move" => {
+                if let (Some(from), Some(to)) = (&step.from, &step.to) {
+                    let from_path = PathBuf::from(from);
+                    let to_path = PathBuf::from(to);
+                    if let Err(e) = ensure_parent(&to_path) {
+                        errors.push(e);
+                        continue;
+                    }
+                    if let Err(e) = fs::rename(&from_path, &to_path) {
+                        errors.push(format!("Failed to move {:?} -> {:?}: {}", from_path, to_path, e));
+                    }
+                }
+            }
+            "create_shim" => {
+                if let (Some(path), Some(content)) = (&step.path, &step.shim_content) {
+                    let shim_path = PathBuf::from(path);
+                    if let Err(e) = ensure_parent(&shim_path) {
+                        errors.push(e);
+                        continue;
+                    }
+                    if let Err(e) = fs::write(&shim_path, content) {
+                        errors.push(format!("Failed to write shim {:?}: {}", shim_path, e));
+                    }
+                }
+            }
+            "delete" => {
+                if let Some(path) = &step.path {
+                    let p = PathBuf::from(path);
+                    if p.exists() {
+                        if let Err(e) = fs::remove_file(&p) {
+                            errors.push(format!("Failed to delete {:?}: {}", p, e));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(serde_json::json!({
+        "success": errors.is_empty(),
+        "errors": errors,
+        "reverted_plan": plan,
+    }))
 }
 

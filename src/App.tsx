@@ -97,6 +97,12 @@ export default function App() {
         const [viewPlan, setViewPlan] = useState<any[]>([]);
         const [viewErrors, setViewErrors] = useState<string[]>([]);
         const [viewDryRun, setViewDryRun] = useState<boolean>(true);
+        const [useSmartClassifier, setUseSmartClassifier] = useState<boolean>(false);
+        const [smartLlmLimit, setSmartLlmLimit] = useState<number>(10);
+        const [smartLlmMinScore, setSmartLlmMinScore] = useState<number>(1.2);
+        const [smartLlmTopAlts, setSmartLlmTopAlts] = useState<number>(2);
+        const [smartLlmEndpoint, setSmartLlmEndpoint] = useState<string>("http://localhost:5001");
+        const [smartLlmModel, setSmartLlmModel] = useState<string>("qwen2.5-coder-14b-instruct");
 
     // Status/Stats state
     const [indexStats, setIndexStats] = useState<IndexStats | null>(null);
@@ -109,7 +115,7 @@ export default function App() {
     // Embed state
     const [embedStatus, setEmbedStatus] = useState<OperationStatus>("idle");
     const [embedProgress, setEmbedProgress] = useState(0);
-    const [embedProgressDetail, setEmbedProgressDetail] = useState<{ processed: number; total: number; status: string } | null>(null);
+    const [embedProgressDetail, setEmbedProgressDetail] = useState<{ processed: number; total: number; status: string; currentBatch?: number; totalBatches?: number; batchSize?: number } | null>(null);
     const [embedResult, setEmbedResult] = useState<any>(null);
     const [embedMaxFiles, setEmbedMaxFiles] = useState<number | undefined>(undefined);
     const [embedBatchSize, setEmbedBatchSize] = useState<number | undefined>(undefined);
@@ -269,7 +275,18 @@ export default function App() {
         try {
             const labels = JSON.parse(labelSpec);
             const rules = rulesSpec.trim() ? JSON.parse(rulesSpec) : {};
-            const res = await tauriService.classifyFiles(indexPath, labels, undefined, rules);
+            const res = await tauriService.classifyFiles(
+                indexPath,
+                labels,
+                undefined,
+                rules,
+                useSmartClassifier,
+                smartLlmModel,
+                smartLlmEndpoint,
+                smartLlmLimit,
+                smartLlmMinScore,
+                smartLlmTopAlts
+            );
             setClassified(res.classified || []);
             setErrorMsg("");
         } catch (e: any) {
@@ -643,11 +660,25 @@ export default function App() {
                     if (p && p.total_files > 0) {
                         const percent = Math.round((p.processed_files / Math.max(1, p.total_files)) * 100);
                         setEmbedProgress(percent);
-                        setEmbedProgressDetail({ processed: p.processed_files, total: p.total_files, status: p.status || "running" });
+                        setEmbedProgressDetail({
+                            processed: p.processed_files,
+                            total: p.total_files,
+                            status: p.status || "running",
+                            currentBatch: p.current_batch,
+                            totalBatches: p.total_batches,
+                            batchSize: p.batch_size,
+                        });
                         if (p.status == "complete") {
                             // finalize
                             setEmbedProgress(100);
-                            setEmbedProgressDetail({ processed: p.total_files, total: p.total_files, status: "complete" });
+                            setEmbedProgressDetail({
+                                processed: p.total_files,
+                                total: p.total_files,
+                                status: "complete",
+                                currentBatch: p.total_batches,
+                                totalBatches: p.total_batches,
+                                batchSize: p.batch_size,
+                            });
                             setEmbedStatus("complete");
                             clearInterval(pollHandle);
                         }
@@ -1352,6 +1383,11 @@ export default function App() {
                                                 {embedProgressDetail && embedProgressDetail.total > 0 && (
                                                     <span> ({embedProgressDetail.processed}/{embedProgressDetail.total} files)</span>
                                                 )}
+                                                {embedProgressDetail && embedProgressDetail.totalBatches && (
+                                                    <span style={{ marginLeft: '0.5rem' }}>
+                                                        · Batch {embedProgressDetail.currentBatch ?? 1}/{embedProgressDetail.totalBatches} (size {embedProgressDetail.batchSize ?? '?'} )
+                                                    </span>
+                                                )}
                                             </p>
                                             <button
                                                 className="btn btn-secondary btn-small"
@@ -1743,6 +1779,22 @@ export default function App() {
                                         onChange={(e) => setRulesSpec(e.target.value)}
                                     />
                                     <small>Use min_confidence, ambiguity_delta, include_patterns, exclude_patterns.</small>
+                                </div>
+                                <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <input type="checkbox" checked={useSmartClassifier} onChange={(e) => setUseSmartClassifier(e.target.checked)} />
+                                        Smart LLM refine (Qwen 14B)
+                                    </label>
+                                    {useSmartClassifier && (
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                                            <input type="text" placeholder="http://localhost:5001" value={smartLlmEndpoint} onChange={(e) => setSmartLlmEndpoint(e.target.value)} />
+                                            <input type="text" placeholder="qwen2.5-coder-14b-instruct" value={smartLlmModel} onChange={(e) => setSmartLlmModel(e.target.value)} />
+                                            <input type="number" placeholder="LLM limit" value={smartLlmLimit} onChange={(e) => setSmartLlmLimit(e.target.value ? parseInt(e.target.value) : 0)} />
+                                            <input type="number" step="0.1" placeholder="Min score before LLM" value={smartLlmMinScore} onChange={(e) => setSmartLlmMinScore(e.target.value ? parseFloat(e.target.value) : 0)} />
+                                            <input type="number" placeholder="Top alternates" value={smartLlmTopAlts} onChange={(e) => setSmartLlmTopAlts(e.target.value ? parseInt(e.target.value) : 0)} />
+                                            <small style={{ gridColumn: '1 / span 2', color: 'var(--text-secondary)' }}>LLM is only called for low-confidence/ambiguous files; limit controls how many files go to Qwen.</small>
+                                        </div>
+                                    )}
                                 </div>
                                 <div className="action-row" style={{ gap: '0.75rem' }}>
                                     <button className="btn btn-primary" onClick={handleClassify}>🔍 Classify</button>

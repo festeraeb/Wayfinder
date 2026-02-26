@@ -259,3 +259,53 @@ export interface NautiReport {
     duplicates: DuplicateFile[];
     copy_pattern_files: FileSuggestion[];
 }
+
+// Reference insights and move planning
+export interface RefNeighbor {
+    path: string;
+    score: number;
+}
+
+export interface FileInsight {
+    path: string;
+    imports: string[];
+    mentions: string[];
+    semantic_neighbors: RefNeighbor[];
+    keywords: string[];
+    score: number;
+}
+
+export interface MoveAction {
+    action: string;
+    from?: string;
+    to?: string;
+    path?: string;
+    shim_content?: string;
+    note?: string;
+}
+
+export interface MovePlan {
+    plan_id: string;
+    generated_at: string;
+    target_root: string;
+    steps: MoveAction[];
+    revert_steps: MoveAction[];
+}
+
+export interface BuildRefIndexResult {
+    success: boolean;
+    built_at: string;
+    refs: number;
+}
+
+export interface ApplyMovePlanResult {
+    success: boolean;
+    errors: string[];
+    applied_plan: MovePlan;
+}
+
+export interface UndoMovePlanResult {
+    success: boolean;
+    errors: string[];
+    reverted_plan: MovePlan;
+}

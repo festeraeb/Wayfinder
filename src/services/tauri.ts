@@ -159,8 +159,19 @@ export const tauriService = {
         return invoke("snooze_reminder", { id, hours });
     },
 
-    async classifyFiles(indexDir: string, labels: Record<string, string[]>, topN?: number, rules?: { min_confidence?: number; ambiguity_delta?: number; include_patterns?: Record<string, string[]>; exclude_patterns?: Record<string, string[]> }): Promise<{ success: boolean; classified: any[] }> {
-        return invoke("classify_files", { indexDir, labels, topN, rules });
+    async classifyFiles(
+        indexDir: string,
+        labels: Record<string, string[]>,
+        topN?: number,
+        rules?: { min_confidence?: number; ambiguity_delta?: number; include_patterns?: Record<string, string[]>; exclude_patterns?: Record<string, string[]> },
+        smartLlm?: boolean,
+        llmModel?: string,
+        llmEndpoint?: string,
+        llmLimit?: number,
+        llmMinScore?: number,
+        llmTopAlternates?: number
+    ): Promise<{ success: boolean; classified: any[] }> {
+        return invoke("classify_files", { indexDir, labels, topN, rules, smartLlm, llmModel, llmEndpoint, llmLimit, llmMinScore, llmTopAlternates });
     },
 
     async buildViewPlan(classified: any[], viewRoot: string, preferJunction?: boolean, dryRun?: boolean): Promise<{ success: boolean; plan: any[]; applied: any[]; errors: string[] }> {
@@ -229,5 +240,30 @@ export const tauriService = {
     },
     async importIndex(zipPath: string, targetDir: string): Promise<boolean> {
         return invoke("import_index", { zipPath, targetDir });
+    },
+
+    // Reference insights and move planning
+    async buildRefIndex(indexDir: string): Promise<Types.BuildRefIndexResult> {
+        return invoke("build_ref_index", { indexDir });
+    },
+
+    async analyzeCluster(files: string[], indexDir: string, includeSemantic: boolean = true): Promise<Types.FileInsight[]> {
+        return invoke("analyze_cluster", { files, indexDir, includeSemantic });
+    },
+
+    async planMoves(targetRoot: string, files: string[], strategy: string = "shim"): Promise<Types.MovePlan> {
+        return invoke("plan_moves", { targetRoot, files, strategy });
+    },
+
+    async applyMovePlan(indexDir: string, plan: Types.MovePlan): Promise<Types.ApplyMovePlanResult> {
+        return invoke("apply_move_plan", { indexDir, plan });
+    },
+
+    async listMoveHistory(indexDir: string): Promise<Types.MovePlan[]> {
+        return invoke("list_move_history", { indexDir });
+    },
+
+    async undoMovePlan(indexDir: string, planId: string): Promise<Types.UndoMovePlanResult> {
+        return invoke("undo_move_plan", { indexDir, planId });
     },
 };

@@ -61,6 +61,12 @@ fn main() {
             commands::cache_index_locally,
             commands::export_index,
             commands::import_index,
+            commands::build_ref_index,
+            commands::analyze_cluster,
+            commands::plan_moves,
+            commands::apply_move_plan,
+            commands::list_move_history,
+            commands::undo_move_plan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

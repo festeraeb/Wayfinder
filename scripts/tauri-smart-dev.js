@@ -6,7 +6,8 @@ import http from 'http';
 
 const FINGERPRINT = 'WAYFINDER_DEV_FINGERPRINT';
 const PREFERRED_PORTS = [5173, 5174, 5175, 5180, 5181];
-const HOST = 'localhost';
+// Use IPv4 loopback to avoid IPv6-only resolution on some Windows setups.
+const HOST = process.env.WAYFINDER_DEV_HOST || '127.0.0.1';
 const VITE_CMD = ['npm', 'run', 'dev', '--', '--strictPort', '--host', HOST, '--port'];
 const TAURI_CMD = ['npx', 'tauri'];
 
