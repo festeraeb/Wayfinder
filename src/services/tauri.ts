@@ -216,6 +216,46 @@ export const tauriService = {
         return invoke("get_watcher_status");
     },
 
+    async getSnapshotStatus(indexDir: string): Promise<Types.SnapshotStatus> {
+        return invoke("get_snapshot_status", { indexDir });
+    },
+
+    async listSnapshots(indexDir: string): Promise<{ snapshots: Types.SnapshotMetadata[] }> {
+        return invoke("list_snapshots", { indexDir });
+    },
+
+    async loadSnapshotConfig(indexDir: string): Promise<{ config?: Types.SnapshotConfig }> {
+        return invoke("load_snapshot_config", { indexDir });
+    },
+
+    async saveSnapshotConfig(
+        indexDir: string,
+        accountName: string,
+        accountKey: string,
+        containerName: string,
+        retentionDays: number,
+        maxSnapshots: number,
+        autoSnapshotIntervalMinutes: number
+    ): Promise<{ success: boolean; message?: string }> {
+        return invoke("save_snapshot_config", {
+            indexDir,
+            accountName,
+            accountKey,
+            containerName,
+            retentionDays,
+            maxSnapshots,
+            autoSnapshotIntervalMinutes,
+        });
+    },
+
+    async createSnapshot(indexDir: string, description?: string): Promise<Types.SnapshotMetadata> {
+        return invoke("create_snapshot", { indexDir, description });
+    },
+
+    async restoreSnapshot(indexDir: string, snapshotId: string): Promise<{ success: boolean; restored?: number }> {
+        return invoke("restore_snapshot", { indexDir, snapshotId });
+    },
+
     // Learning system integration
     async logSessionStart(sessionId: string, startedAt: string): Promise<void> {
         // Placeholder for backend integration

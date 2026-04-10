@@ -111,6 +111,43 @@ export interface ProviderConfigStatus {
     exists: boolean;
 }
 
+export interface SnapshotMetadata {
+    id: string;
+    timestamp: string;
+    size_bytes: number;
+    files_count: number;
+    description?: string;
+    storage_url?: string;
+}
+
+export interface SnapshotStatus {
+    configured: boolean;
+    has_key: boolean;
+    last_snapshot?: SnapshotMetadata | null;
+    snapshots_available: number;
+    total_size_bytes: number;
+}
+
+export interface SnapshotConfig {
+    storage_provider: string;
+    account_name?: string;
+    account_key?: string;
+    container_name?: string;
+    retention_days: number;
+    max_snapshots: number;
+    auto_snapshot_interval_minutes: number;
+}
+
+export interface InteractionAgentSettings {
+    sarcasmLevel: number;
+    mood: "low" | "medium" | "high";
+    muted: boolean;
+    muteMinutes: number;
+    rewardTone: "gentle" | "genuine" | "celebratory";
+    openDyslexic: boolean;
+    watchScope: "user" | "workspace";
+}
+
 export interface AzureValidationResult {
     success: boolean;
     message: string;
