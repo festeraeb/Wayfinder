@@ -3422,7 +3422,7 @@ pub async fn get_organization_suggestions() -> Result<serde_json::Value, String>
         }));
     }
     
-    let suggestions = file_intelligence::generate_suggestions(&documents, &prefs);
+    let suggestions = file_intelligence::generate_suggestions(&documents, &prefs).await;
     
     Ok(serde_json::json!({
         "success": true,
@@ -3540,7 +3540,7 @@ pub async fn start_file_watcher(watch_paths: Option<Vec<String>>) -> Result<serd
                 };
 
                 if should_prompt {
-                    let suggestions = file_intelligence::generate_suggestions(&[doc], &prefs);
+                    let suggestions = file_intelligence::generate_suggestions(&[doc], &prefs).await;
                     if let Some(sugg) = suggestions.into_iter().next() {
                         if let Ok(mut s) = WATCHER_SUGGESTIONS.lock() {
                             s.push(WatcherSuggestion { suggestion: sugg, event: event.clone() });

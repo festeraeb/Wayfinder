@@ -270,7 +270,7 @@ pub fn scan_for_documents(root_path: &str, max_depth: Option<usize>) -> Result<V
 }
 
 /// Analyze documents and generate organization suggestions
-pub fn generate_suggestions(documents: &[DiscoveredDocument], preferences: &UserPreferences) -> Vec<OrganizationSuggestion> {
+pub async fn generate_suggestions(documents: &[DiscoveredDocument], preferences: &UserPreferences) -> Vec<OrganizationSuggestion> {
     let mut suggestions = Vec::new();
     
     for doc in documents {
@@ -280,7 +280,7 @@ pub fn generate_suggestions(documents: &[DiscoveredDocument], preferences: &User
         }
         
         // Analyze the document
-        if let Some(suggestion) = analyze_document(doc, preferences) {
+        if let Some(suggestion) = analyze_document(doc, preferences).await {
             suggestions.push(suggestion);
         }
     }
@@ -292,7 +292,7 @@ pub fn generate_suggestions(documents: &[DiscoveredDocument], preferences: &User
 }
 
 /// Analyze a single document and maybe suggest an action
-fn analyze_document(doc: &DiscoveredDocument, preferences: &UserPreferences) -> Option<OrganizationSuggestion> {
+async fn analyze_document(doc: &DiscoveredDocument, preferences: &UserPreferences) -> Option<OrganizationSuggestion> {
     let name_lower = doc.name.to_lowercase();
     let parent_lower = doc.parent_dir.to_lowercase();
     
@@ -340,7 +340,7 @@ fn analyze_document(doc: &DiscoveredDocument, preferences: &UserPreferences) -> 
             file_path: doc.path.clone(),
             file_name: doc.name.clone(),
             action: SuggestionAction::Rename {
-                new_name: suggest_better_name(doc),
+                new_name: suggest_better_name(doc).await,
             },
             confidence: 0.7,
             reason: "Generic filename - consider a more descriptive name".to_string(),
@@ -458,12 +458,17 @@ fn is_poorly_named(name: &str) -> bool {
     false
 }
 
-/// Suggest a better name for a file
-fn suggest_better_name(doc: &DiscoveredDocument) -> String {
+/// Suggest a better name for a file using a local LLM
+async fn suggest_better_name(doc: &DiscoveredDocument) -> String {
     let date = chrono::Local::now().format("%Y-%m-%d");
     let ext = &doc.extension;
     
-    // Try to extract something meaningful
+    // Read the first 500 characters of the file for context
+    let context = std::fs::read_to_string(&doc.path)
+        .map(|s| s.chars().take(500).collect::<String>())
+        .unwrap_or_default();
+    
+    // Fallback base
     let base = match doc.doc_type {
         DocumentType::Word => "document",
         DocumentType::Excel => "spreadsheet",
@@ -471,6 +476,33 @@ fn suggest_better_name(doc: &DiscoveredDocument) -> String {
         DocumentType::PDF => "document",
         _ => "file",
     };
+
+    if !context.is_empty() {
+        let client = reqwest::Client::new();
+        let prompt = format!("You are an expert at naming files. Based on the following file content, generate a concise, 2-4 word semantic filename using snake_case without extension. Output ONLY the filename.\n\nCONTENT: {}", context);
+        
+        let payload = serde_json::json!({
+            "model": "Nemotron-H-8B-Reasoning-128K-Q4_K_M",
+            "messages": [
+                {"role": "system", "content": "You output only semantic file names in snake_case."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 20
+        });
+
+        if let Ok(res) = client.post("http://localhost:5001/v1/chat/completions").json(&payload).send().await {
+            if let Ok(json) = res.json::<serde_json::Value>().await {
+                if let Some(content) = json["choices"][0]["message"]["content"].as_str() {
+                    let mut clean = content.trim().to_string();
+                    clean = clean.replace("\"", "").replace("'", "");
+                    if !clean.is_empty() {
+                        return format!("{}-{}.{}", date, clean, ext);
+                    }
+                }
+            }
+        }
+    }
     
     format!("{}-{}.{}", date, base, ext)
 }
