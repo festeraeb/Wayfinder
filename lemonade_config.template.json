@@ -1,9 +1,9 @@
 {
   "provider": "llama",
-  "local_endpoint": "http://localhost:13306/v1",
-  "local_model": "embeddinggemma-300m-f16",
-  "chat_endpoint": "http://localhost:13306/v1",
-  "chat_model": "qwen2.5-coder-1.5b-instruct-q4_k_m",
+  "local_endpoint": "https://cesarops.com/lemonade/v1",
+  "local_model": "embeddinggemma-300m",
+  "chat_endpoint": "https://cesarops.com/lemonade/v1",
+  "chat_model": "nauti-recovery",
   "system_prompt": "You are Wayfinder, an AI assistant for ADHD students and programmers. Your tasks: semantic search (find files by meaning), naming suggestions (clear, descriptive names), task decomposition (break ideas into 8 concrete tasks), Git Clippy (friendly reminders), file clustering (group related files). Be concise. Be direct. ADHD users need focus, not walls of text.",
-  "notes": "Copy to .wayfinder_index/lemonade_config.json. Change endpoint to your Lemonade server. Default: local Lemonade on port 13306."
+  "notes": "Free public endpoint at cesarops.com/lemonade/. Chat: Qwen3-0.6B (CPU). Embeddings: embeddinggemma-300m (768d). No API key needed. Rate-limited."
 }

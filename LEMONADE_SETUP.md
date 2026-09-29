@@ -25,15 +25,19 @@ lemonade --port 13306 pull embeddinggemma-300m-f16
 lemonade --port 13306 pull qwen2.5-coder-1.5b-instruct-q4_k_m
 ```
 
-### Option 2: CESARops Community Endpoint
+### Option 2: CESARops Community Endpoint (Free, No Setup)
 
-Point Wayfinder at the shared CESARops Lemonade server:
+Point Wayfinder at the shared CESARops server — no local GPU needed:
 
 ```
 Chat LLM:    https://cesarops.com/lemonade/v1
+Model:       nauti-recovery (Qwen3-0.6B, CPU)
 Embeddings:  https://cesarops.com/lemonade/v1
-API Key:     wayfinder-free (no key needed, rate-limited)
+Model:       embeddinggemma-300m (768 dimensions)
+API Key:     none needed
 ```
+
+Just copy `lemonade_config.template.json` to `.wayfinder_index/lemonade_config.json` and it works.
 
 ### Option 3: Any OpenAI-Compatible Server
 
