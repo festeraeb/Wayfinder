@@ -76,6 +76,20 @@ npm run tauri dev
 npm run tauri build
 ```
 
+### Local Lemonade Server (AMD GPUs — No ROCm Needed)
+
+```bash
+pip install lemonade-sdk
+lemond --host 127.0.0.1 --port 13306
+lemonade --port 13306 backends install llamacpp:vulkan
+lemonade --port 13306 pull embeddinggemma-300m-f16
+lemonade --port 13306 pull qwen2.5-coder-1.5b-instruct-q4_k_m
+```
+
+API base: http://localhost:13306/v1
+
+See `LEMONADE_SETUP.md` for full instructions.
+
 ### Local koboldcpp defaults (bundled flow)
 
 Wayfinder now defaults to local endpoints/models so you can run without retyping:
