@@ -6,3 +6,7 @@ pydantic>=1.9.0
 tqdm>=4.60.0
 google-cloud-aiplatform>=1.138.0
 google-genai>=1.64.0
+requests>=2.28.0
+qdrant-client>=1.7.0
+hdbscan>=0.8.0
+umap-learn>=0.5.0

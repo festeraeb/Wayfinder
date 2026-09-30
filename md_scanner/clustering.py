@@ -69,6 +69,41 @@ class ClusteringEngine:
         self.save_clusters()
         return clusters
 
+    def cluster_hdbscan(
+        self,
+        embeddings: np.ndarray,
+        file_paths: List[str],
+        min_cluster_size: int = 5,
+        min_samples: Optional[int] = None,
+        progress_callback=None,
+    ) -> Dict[int, List[str]]:
+        """Cluster with HDBSCAN (unknown k; noise label -1 kept as its own
+        bucket). Falls back to KMeans when hdbscan is not installed."""
+        if len(embeddings) == 0:
+            return {}
+        try:
+            import hdbscan as _hdbscan
+        except Exception:
+            if progress_callback:
+                progress_callback("clustering",
+                                  "hdbscan missing, falling back to KMeans")
+            return self.cluster(embeddings, file_paths,
+                                progress_callback=progress_callback)
+        if progress_callback:
+            progress_callback("clustering",
+                              f"HDBSCAN on {len(embeddings)} vectors")
+        clusterer = _hdbscan.HDBSCAN(min_cluster_size=min_cluster_size,
+                                     min_samples=min_samples,
+                                     metric="euclidean")
+        labels = clusterer.fit_predict(embeddings)
+        clusters: Dict[int, List[str]] = {}
+        for label, file_path in zip(labels, file_paths):
+            cid = int(label)
+            clusters.setdefault(cid, []).append(file_path)
+        self.clusters = clusters
+        self.save_clusters()
+        return clusters
+
     def get_cluster_summary(self, cluster_id: int, max_files: int = 5) -> Dict:
         """
         Get summary of a cluster.

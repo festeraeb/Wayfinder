@@ -5,10 +5,8 @@ import click
 from pathlib import Path
 from tqdm import tqdm
 from md_scanner.scanner import FileScanner
-from md_scanner.embeddings import EmbeddingEngine
 from md_scanner.clustering import ClusteringEngine
 from md_scanner.timeline import TimelineEngine
-from md_scanner.search import SearchEngine
 
 INDEX_DIR = Path.home() / '.md_index'
 
@@ -37,9 +35,62 @@ def scan(directory, index_dir):
     click.echo(f"Index saved to {scanner.index_file}")
 
 @cli.command()
+@click.option('--collection', default=None,
+              help='Qdrant collection (default QDRANT_COLLECTION or codebase_v6)')
+@click.option('--min-cluster-size', type=int, default=5,
+              help='HDBSCAN min_cluster_size')
+@click.option('--qdrant-index-dir', 'qdrant_index_dir', default=str(INDEX_DIR),
+              help='Where to save clusters.json')
+@click.option('--limit', type=int, default=0,
+              help='Max points to cluster (0 = whole collection)')
+def cluster_qdrant(collection, min_cluster_size, qdrant_index_dir, limit):
+    """Cluster a Qdrant collection via HDBSCAN (fleet all-drives audit)."""
+    from md_scanner.qdrant_backend import QdrantEngine
+    from md_scanner.clustering import ClusteringEngine
+    import os
+    coll = collection or os.environ.get("QDRANT_COLLECTION", "codebase_v6")
+    click.echo(f"Fetching vectors from Qdrant collection '{coll}'...")
+    qe = QdrantEngine(collection=coll)
+    total = qe.point_count()
+    click.echo(f"  {total} points in collection")
+    n = limit if limit and limit < total else total
+    vecs, paths, offset, done = [], [], None, 0
+    with tqdm(total=n) as pbar:
+        while done < n:
+            pts, offset = qe.scroll_points(limit=min(1000, n - done), offset=offset)
+            if not pts:
+                break
+            for p in pts:
+                v = p.get("vector")
+                if isinstance(v, dict):
+                    v = next(iter(v.values()))
+                if v is None:
+                    continue
+                vecs.append(v)
+                pl = p.get("payload", {})
+                paths.append(pl.get("file_path") or pl.get("path")
+                             or pl.get("file") or str(p.get("id")))
+            done += len(pts)
+            pbar.update(len(pts))
+            if offset is None:
+                break
+    import numpy as np
+    click.echo(f"Clustering {len(vecs)} vectors (HDBSCAN, min_size={min_cluster_size})...")
+    ce = ClusteringEngine(index_dir=qdrant_index_dir)
+    clusters = ce.cluster_hdbscan(np.array(vecs, dtype="float32"), paths,
+                                  min_cluster_size=min_cluster_size,
+                                  progress_callback=lambda s, m: click.echo(f"  {m}"))
+    click.echo(f"\nCreated {len(clusters)} clusters:")
+    for summary in ce.list_clusters():
+        click.echo(f"  Cluster {summary['id']}: {summary['file_count']} files")
+    click.echo(f"Saved to {ce.clusters_file}")
+
+
+@cli.command()
 @click.option('--index-dir', default=str(INDEX_DIR), help='Index directory')
 def embed(index_dir):
     """Generate embeddings for indexed files."""
+    from md_scanner.embeddings import EmbeddingEngine
     scanner = FileScanner(index_dir)
     files = scanner.load_index()
 
@@ -62,8 +113,12 @@ def embed(index_dir):
 
 @cli.command()
 @click.option('--index-dir', default=str(INDEX_DIR), help='Index directory')
-@click.option('--num-clusters', type=int, default=None, help='Number of clusters')
-def cluster(index_dir, num_clusters):
+@click.option('--num-clusters', type=int, default=None, help='Number of clusters (KMeans only)')
+@click.option('--hdbscan/--kmeans', 'use_hdbscan', default=True,
+              help='Use HDBSCAN unknown-k (default) or legacy KMeans')
+@click.option('--min-cluster-size', type=int, default=5,
+              help='HDBSCAN min_cluster_size')
+def cluster(index_dir, num_clusters, use_hdbscan, min_cluster_size):
     """Cluster files into semantic groups."""
     embedding_engine = EmbeddingEngine(index_dir=index_dir)
 
@@ -78,7 +133,15 @@ def cluster(index_dir, num_clusters):
     def progress_update(stage, message):
         click.echo(f"  {message}")
 
-    clusters = clustering_engine.cluster(
+    if use_hdbscan:
+        clusters = clustering_engine.cluster_hdbscan(
+            embedding_engine.embeddings,
+            embedding_engine.file_paths,
+            min_cluster_size=min_cluster_size,
+            progress_callback=progress_update,
+        )
+    else:
+        clusters = clustering_engine.cluster(
         embedding_engine.embeddings,
         embedding_engine.file_paths,
         n_clusters=num_clusters,
@@ -93,12 +156,13 @@ def cluster(index_dir, num_clusters):
         )
 
 @cli.command()
-@click.argument('query')
 @click.option('--index-dir', default=str(INDEX_DIR), help='Index directory')
 @click.option('--top-k', type=int, default=10, help='Number of results')
 @click.option('--semantic-weight', type=float, default=0.7, help='Semantic weight')
+@click.argument('query')
 def search(query, index_dir, top_k, semantic_weight):
     """Search for files by semantic similarity."""
+    from md_scanner.embeddings import EmbeddingEngine
     embedding_engine = EmbeddingEngine(index_dir=index_dir)
 
     if not embedding_engine.load_embeddings():
@@ -194,6 +258,29 @@ def stats(index_dir):
     clustering_engine = ClusteringEngine(index_dir=index_dir)
     if clustering_engine.load_clusters():
         click.echo(f"  Clusters: {len(clustering_engine.clusters)}")
+
+@cli.command()
+@click.option('--collection', default=None,
+              help='Qdrant collection (default QDRANT_COLLECTION or codebase_v6)')
+@click.option('--top-k', type=int, default=10, help='Number of results')
+@click.argument('query')
+def search_qdrant(collection, top_k, query):
+    """Semantic search across a Qdrant collection (fleet all-drives)."""
+    from md_scanner.qdrant_backend import QdrantEngine
+    import os
+    coll = collection or os.environ.get("QDRANT_COLLECTION", "codebase_v6")
+    qe = QdrantEngine(collection=coll)
+    click.echo(f"Searching collection '{coll}' for: '{query}'")
+    results = qe.search(query, top_k=top_k)
+    if not results:
+        click.echo("  (no results)")
+        return
+    click.echo(f"\nFound {len(results)} results:")
+    for i, (file_path, score) in enumerate(results, 1):
+        file_name = Path(file_path).name
+        click.echo(f"  {i}. {file_name} ({score:.3f})")
+        click.echo(f"     => {file_path}")
+
 
 if __name__ == '__main__':
     cli()

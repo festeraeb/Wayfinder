@@ -30,22 +30,31 @@ class EmbeddingEngine:
         self.file_paths = None
 
     def _extract_content(self, file_path: str, max_chars: int = 2000) -> str:
-        """
-        Extract content from markdown file for embedding.
+        """Extract content from file for embedding.
 
-        Args:
-            file_path: Path to markdown file
-            max_chars: Maximum characters to extract
-
-        Returns:
-            Extracted text content
+        Markdown: first max_chars (legacy behaviour).
+        Code: head + middle + tail slices so imports, logic, and tests
+        all contribute (fleet all-drives audit requirement).
         """
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read(max_chars)
-            return content.strip()
+                content = f.read(max_chars * 3)
         except Exception:
             return ""
+        if len(content) <= max_chars:
+            return content.strip()
+        ext = Path(file_path).suffix.lower()
+        code_exts = {'.py', '.rs', '.ts', '.tsx', '.js', '.jsx', '.go',
+                     '.java', '.c', '.cpp', '.h', '.hpp', '.toml', '.yaml',
+                     '.yml', '.json', '.sh'}
+        if ext in code_exts:
+            third = max_chars // 3
+            head = content[:third]
+            mid_start = max(0, len(content) // 2 - third // 2)
+            mid = content[mid_start:mid_start + third]
+            tail = content[-third:]
+            return (head + "\n<MID>\n" + mid + "\n<TAIL>\n" + tail).strip()
+        return content[:max_chars].strip()
 
     def generate_embeddings(self, file_paths: List[str], progress_callback=None) -> None:
         """
