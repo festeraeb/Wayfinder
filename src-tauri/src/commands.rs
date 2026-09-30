@@ -3514,6 +3514,17 @@ pub async fn start_file_watcher(watch_paths: Option<Vec<String>>) -> Result<serd
     
     // Spawn a thread to collect events
     std::thread::spawn(move || {
+        // generate_suggestions is async, but this is a plain OS thread with
+        // no tokio context. Build a current-thread runtime once and block on
+        // it per event rather than nesting runtimes inside the Tauri one.
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(_) => return,
+        };
+
         while let Ok(event) = rx.recv() {
             // Store raw event
             if let Ok(mut e) = WATCHER_EVENTS.lock() {
@@ -3540,7 +3551,7 @@ pub async fn start_file_watcher(watch_paths: Option<Vec<String>>) -> Result<serd
                 };
 
                 if should_prompt {
-                    let suggestions = file_intelligence::generate_suggestions(&[doc], &prefs).await;
+                    let suggestions = rt.block_on(file_intelligence::generate_suggestions(&[doc], &prefs));
                     if let Some(sugg) = suggestions.into_iter().next() {
                         if let Ok(mut s) = WATCHER_SUGGESTIONS.lock() {
                             s.push(WatcherSuggestion { suggestion: sugg, event: event.clone() });
