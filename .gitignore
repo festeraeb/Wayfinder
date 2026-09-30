@@ -39,6 +39,11 @@ wheels/
 !package-lock.json
 !tsconfig.json
 !src-tauri/tauri.conf.json
+# Tauri capabilities are source, not credentials -- the blanket *.json rule
+# above was silently dropping them, which is why no dialog permission was
+# ever granted and every folder picker was dead.
+!src-tauri/capabilities/
+!src-tauri/capabilities/*.json
 !requirements.txt
 
 # Testing
