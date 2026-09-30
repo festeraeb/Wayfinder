@@ -75,6 +75,7 @@ export default function App() {
     // Index configuration
     const [indexPath, setIndexPath] = useState<string>("");
     const [scanPath, setScanPath] = useState<string>("");
+    const [scanPathError, setScanPathError] = useState<string | null>(null);
     const [selectedTypes, setSelectedTypes] = useState<string[]>(["Markdown"]);
     const [gitRepoPath, setGitRepoPath] = useState<string>("");
 
@@ -1109,19 +1110,34 @@ export default function App() {
                                 <button 
                                     className="btn btn-secondary"
                                     onClick={async () => {
-                                        const selected = await open({
-                                            directory: true,
-                                            multiple: false,
-                                            title: "Select folder to scan"
-                                        });
-                                        if (selected && typeof selected === 'string') {
-                                            setScanPath(selected);
+                                        try {
+                                            const selected = await open({
+                                                directory: true,
+                                                multiple: false,
+                                                title: "Select folder to scan"
+                                            });
+                                            if (selected && typeof selected === 'string') {
+                                                setScanPath(selected);
+                                            }
+                                        } catch (e) {
+                                            // Previously unhandled: an ACL/denial
+                                            // (or missing dialog permission)
+                                            // surfaced as a silent no-op, so the
+                                            // button looked broken with no cause.
+                                            setScanPathError(
+                                                `Could not open folder picker: ${e}`
+                                            );
                                         }
                                     }}
                                 >
                                     📂 Browse
                                 </button>
                             </div>
+                            {scanPathError && (
+                                <p className="error-message" role="alert">
+                                    {scanPathError}
+                                </p>
+                            )}
                         </div>
 
                         {/* Index Path (optional) */}
