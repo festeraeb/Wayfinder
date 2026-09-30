@@ -19,13 +19,18 @@ jobs:
           node-version: '18'
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up MSVC toolchain
+        # windows-latest can resolve a VS "18 Insiders" preview whose MSVC
+        # linker path does not exist. Force the stable VS 2022 build tools.
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          where link.exe
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build Tauri app
         run: npm run tauri build
