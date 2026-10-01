@@ -1603,13 +1603,23 @@ pub async fn create_clusters(index_dir: String, num_clusters: Option<usize>) -> 
 }
 
 /// Parent folder of a path, normalised to forward slashes.
+///
+/// A Windows drive root ("C:/file.txt") yields "C:/" rather than "C:", so the
+/// root scope has the same shape as the POSIX root "/" and the UI does not show
+/// one drive as a bare drive letter.
 fn scope_of_path(path: &str) -> String {
     let p = path.replace('\\', "/");
-    match p.rfind('/') {
+    let scope = match p.rfind('/') {
         Some(0) => "/".to_string(),
         Some(i) => p[..i].to_string(),
         None => ".".to_string(),
+    };
+    // Bare drive letter, e.g. "C:" from "C:/file.txt".
+    let bytes = scope.as_bytes();
+    if bytes.len() == 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return format!("{}/", scope);
     }
+    scope
 }
 
 /// Mean vector of a slice of embeddings. `None` for an empty slice so callers
@@ -4609,6 +4619,15 @@ mod scoped_clustering_tests {
         // Parent of /abs/a.md is /abs; a file at the filesystem root gives "/".
         assert_eq!(scope_of_path("/abs/a.md"), "/abs");
         assert_eq!(scope_of_path("/a.md"), "/");
+    }
+
+    #[test]
+    fn scope_of_path_normalises_windows_drive_root() {
+        // A drive root should look like the POSIX root, not a bare drive letter,
+        // otherwise one drive renders as "C:" and another as "/".
+        assert_eq!(scope_of_path("C:/file.txt"), "C:/");
+        assert_eq!(scope_of_path("C:/docs/a.md"), "C:/docs");
+        assert_eq!(scope_of_path("D:\\notes\\b.md"), "D:/notes");
     }
 
     #[test]
