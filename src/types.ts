@@ -18,6 +18,44 @@ export interface ClusterResult {
     message?: string;
 }
 
+/// Result of the hierarchical (per-folder) clustering run.
+export interface ScopedClusterResult {
+    clusters_created: number;
+    scope_count: number;
+    total_files: number;
+    message?: string;
+}
+
+export interface ScopedClusterFile {
+    name: string;
+    path: string;
+}
+
+export interface ScopedClusterSummary {
+    id: number;
+    files: ScopedClusterFile[];
+    file_count: number;
+}
+
+/// `scoped_clusters.json` as returned by get_scoped_clusters.
+///
+/// Note: in `drive`, `file_paths` entries are FOLDER paths (scopes), not file
+/// paths. `drive_display` carries the same data pre-shaped for rendering.
+export interface ScopedClusters {
+    scopes: Record<string, unknown>;
+    drive: Array<{
+        id: number;
+        centroid: number[];
+        file_paths: string[];
+        label: string | null;
+    }>;
+    drive_display?: ScopedClusterSummary[];
+    scope_to_drive: Record<string, number>;
+    scope_count: number;
+    total_files: number;
+    message?: string;
+}
+
 export interface SearchResult {
     path: string;
     name: string;

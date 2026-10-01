@@ -1795,6 +1795,69 @@ pub async fn create_scoped_clusters(
     }))
 }
 
+/// Read back a previously written `scoped_clusters.json` for the frontend.
+///
+/// Returns an empty-but-valid shape when nothing has been generated yet, so
+/// the UI can render an empty state instead of treating "not run yet" as an
+/// error (mirrors get_clusters_summary).
+#[tauri::command]
+pub async fn get_scoped_clusters(index_dir: String) -> Result<serde_json::Value, String> {
+    let index_path = Path::new(&index_dir);
+    let scoped_file = index_path.join("scoped_clusters.json");
+
+    if !scoped_file.exists() {
+        return Ok(serde_json::json!({
+            "scopes": {},
+            "drive": [],
+            "scope_to_drive": {},
+            "scope_count": 0,
+            "total_files": 0,
+            "message": "No scoped clusters found. Run 'Create Scoped Clusters' first."
+        }));
+    }
+
+    let content = fs::read_to_string(&scoped_file)
+        .map_err(|e| format!("Failed to read scoped clusters file: {}", e))?;
+    let mut parsed: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse scoped clusters: {}", e))?;
+
+    // Reshape for display: give the frontend {name, path} pairs like the flat
+    // summary does, so ClusterPanel can reuse its file-list renderer.
+    if let Some(drive) = parsed.get("drive").and_then(|d| d.as_array()) {
+        let shaped: Vec<serde_json::Value> = drive
+            .iter()
+            .map(|c| {
+                let files: Vec<serde_json::Value> = c
+                    .get("file_paths")
+                    .and_then(|f| f.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|p| {
+                                let s = p.as_str().unwrap_or("");
+                                serde_json::json!({
+                                    "name": Path::new(s)
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| s.to_string()),
+                                    "path": s
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "id": c.get("id").cloned().unwrap_or(serde_json::json!(0)),
+                    "files": files,
+                    "file_count": files.len(),
+                })
+            })
+            .collect();
+        parsed["drive_display"] = serde_json::Value::Array(shaped);
+    }
+
+    Ok(parsed)
+}
+
 /// K-means clustering implementation
 fn kmeans_cluster(embeddings: &[FileEmbedding], k: usize) -> Vec<Cluster> {
     if embeddings.is_empty() || k == 0 {

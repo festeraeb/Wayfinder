@@ -33,6 +33,25 @@ export const tauriService = {
         });
     },
 
+    /// Hierarchical clustering: per-folder clusters plus a drive-level rollup
+    /// computed from one centroid per folder (never by re-clustering every
+    /// member vector). Writes scoped_clusters.json; clusters.json is untouched.
+    async createScopedClusters(
+        indexDir: string,
+        minPerScope?: number
+    ): Promise<Types.ScopedClusterResult> {
+        return invoke("create_scoped_clusters", {
+            indexDir,
+            minPerScope,
+        });
+    },
+
+    /// Read back scoped_clusters.json. Returns an empty-but-valid shape when
+    /// no scoped clustering has been run yet, rather than throwing.
+    async getScopedClusters(indexDir: string): Promise<Types.ScopedClusters> {
+        return invoke("get_scoped_clusters", { indexDir });
+    },
+
     async search(
         query: string,
         indexDir: string,
