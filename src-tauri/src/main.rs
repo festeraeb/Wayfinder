@@ -19,6 +19,7 @@ fn main() {
             commands::generate_embeddings,
             commands::generate_embeddings_multi,
             commands::create_clusters,
+            commands::create_scoped_clusters,
             commands::search,
             commands::get_clusters_summary,
             commands::get_timeline,

@@ -1602,6 +1602,199 @@ pub async fn create_clusters(index_dir: String, num_clusters: Option<usize>) -> 
     }))
 }
 
+/// Parent folder of a path, normalised to forward slashes.
+fn scope_of_path(path: &str) -> String {
+    let p = path.replace('\\', "/");
+    match p.rfind('/') {
+        Some(0) => "/".to_string(),
+        Some(i) => p[..i].to_string(),
+        None => ".".to_string(),
+    }
+}
+
+/// Mean vector of a slice of embeddings. `None` for an empty slice so callers
+/// can tell "no centroid" from a genuine zero vector.
+fn centroid_of(embeddings: &[&FileEmbedding]) -> Option<Vec<f32>> {
+    let first = embeddings.first()?;
+    let dim = first.embedding.len();
+    if dim == 0 {
+        return None;
+    }
+    let mut acc = vec![0f32; dim];
+    for emb in embeddings {
+        // Mismatched dimensions would silently produce garbage; skip rather
+        // than panic inside a command handler.
+        if emb.embedding.len() != dim {
+            continue;
+        }
+        for (i, v) in emb.embedding.iter().enumerate() {
+            acc[i] += v;
+        }
+    }
+    let n = embeddings.len() as f32;
+    Some(acc.into_iter().map(|v| v / n).collect())
+}
+
+/// Hierarchical (scoped) clustering over an index.
+///
+/// Per-folder clusters stay the source of truth; the drive-level view is
+/// computed from one centroid per folder rather than by re-clustering every
+/// member vector. That keeps the drive-wide overview proportional to the
+/// number of folders instead of the number of files, so editing one folder
+/// does not force a whole-drive re-cluster.
+#[derive(Serialize, Debug)]
+pub struct ScopedClustering {
+    /// folder path -> its own clusters (each with its own centroid)
+    pub scopes: HashMap<String, Vec<Cluster>>,
+    /// drive-level clusters over per-scope centroids (file_paths are scope names)
+    pub drive: Vec<Cluster>,
+    /// folder path -> drive cluster id
+    pub scope_to_drive: HashMap<String, usize>,
+    pub scope_count: usize,
+    pub total_files: usize,
+}
+
+/// Build a pseudo-embedding list from per-scope centroids so the existing
+/// k-means implementation can cluster the rollup without a second algorithm.
+fn centroids_as_embeddings(map: &HashMap<String, Vec<f32>>) -> Vec<FileEmbedding> {
+    map.iter()
+        .map(|(scope, c)| FileEmbedding {
+            path: scope.clone(),
+            embedding: c.clone(),
+            content_hash: String::new(),
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub async fn create_scoped_clusters(
+    index_dir: String,
+    min_per_scope: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    println!("[RUST] create_scoped_clusters called for: {}", index_dir);
+
+    let index_path = Path::new(&index_dir);
+    let embeddings_file = index_path.join("embeddings.json");
+    let clusters_file = index_path.join("scoped_clusters.json");
+
+    if !embeddings_file.exists() {
+        return Err("No embeddings file found. Please generate embeddings first.".to_string());
+    }
+
+    let content = fs::read_to_string(&embeddings_file)
+        .map_err(|e| format!("Failed to read embeddings: {}", e))?;
+    let embeddings_data: EmbeddingsData = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse embeddings: {}", e))?;
+
+    if embeddings_data.embeddings.is_empty() {
+        return Err("No embeddings found. Please generate embeddings first.".to_string());
+    }
+
+    let min_per_scope = min_per_scope.unwrap_or(2).max(2);
+
+    // Group indices by scope, preserving first-seen order for determinism.
+    let mut order: Vec<String> = Vec::new();
+    let mut by_scope: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, emb) in embeddings_data.embeddings.iter().enumerate() {
+        let scope = scope_of_path(&emb.path);
+        if !by_scope.contains_key(&scope) {
+            order.push(scope.clone());
+        }
+        by_scope.entry(scope).or_default().push(i);
+    }
+
+    let mut scopes: HashMap<String, Vec<Cluster>> = HashMap::new();
+    let mut scope_centroids: HashMap<String, Vec<f32>> = HashMap::new();
+
+    for scope in &order {
+        let indices = &by_scope[scope];
+        let scoped: Vec<FileEmbedding> = indices
+            .iter()
+            .map(|i| embeddings_data.embeddings[*i].clone())
+            .collect();
+        let refs: Vec<&FileEmbedding> = scoped.iter().collect();
+
+        if scoped.len() < min_per_scope {
+            // Too small to split meaningfully; keep the folder whole rather
+            // than dropping it from the picture.
+            scopes.insert(
+                scope.clone(),
+                vec![Cluster {
+                    id: 0,
+                    centroid: centroid_of(&refs).unwrap_or_default(),
+                    file_paths: scoped.iter().map(|e| e.path.clone()).collect(),
+                    label: None,
+                }],
+            );
+        } else {
+            // sqrt-of-count keeps small folders from shattering into noise.
+            let k = ((scoped.len() as f64).sqrt() as usize).clamp(2, 20);
+            scopes.insert(scope.clone(), kmeans_cluster(&scoped, k));
+        }
+
+        if let Some(c) = centroid_of(&refs) {
+            scope_centroids.insert(scope.clone(), c);
+        }
+    }
+
+    // Drive rollup: cluster the per-scope CENTROIDS, not every member vector.
+    // This is the whole point -- cost scales with folders, not files.
+    let drive: Vec<Cluster> = match scope_centroids.len() {
+        0 => Vec::new(),
+        1 => {
+            let (scope, c) = scope_centroids.iter().next().unwrap();
+            vec![Cluster {
+                id: 0,
+                centroid: c.clone(),
+                file_paths: vec![scope.clone()],
+                label: None,
+            }]
+        }
+        n => {
+            let pseudo = centroids_as_embeddings(&scope_centroids);
+            let k = ((n as f64).sqrt() as usize).clamp(2, 20);
+            kmeans_cluster(&pseudo, k)
+        }
+    };
+
+    // Map each scope to the drive cluster it landed in.
+    let mut scope_to_drive: HashMap<String, usize> = HashMap::new();
+    for cluster in &drive {
+        for scope in &cluster.file_paths {
+            scope_to_drive.insert(scope.clone(), cluster.id);
+        }
+    }
+
+    let result = ScopedClustering {
+        scope_count: scopes.len(),
+        total_files: embeddings_data.embeddings.len(),
+        scopes,
+        drive: drive.clone(),
+        scope_to_drive,
+    };
+
+    let json = serde_json::to_string_pretty(&result)
+        .map_err(|e| format!("Failed to serialize clusters: {}", e))?;
+    fs::write(&clusters_file, json)
+        .map_err(|e| format!("Failed to write scoped clusters file: {}", e))?;
+
+    println!(
+        "[RUST] Scoped clustering complete: {} scopes -> {} drive clusters",
+        result.scope_count,
+        drive.len()
+    );
+
+    Ok(serde_json::json!({
+        "clusters_created": drive.len(),
+        "scope_count": result.scope_count,
+        "total_files": result.total_files,
+        "message": format!(
+            "Created {} drive clusters from {} folders ({} files)",
+            drive.len(), result.scope_count, result.total_files
+        )
+    }))
+}
+
 /// K-means clustering implementation
 fn kmeans_cluster(embeddings: &[FileEmbedding], k: usize) -> Vec<Cluster> {
     if embeddings.is_empty() || k == 0 {
@@ -4320,5 +4513,82 @@ pub async fn undo_move_plan(index_dir: String, plan_id: String) -> Result<serde_
         "errors": errors,
         "reverted_plan": plan,
     }))
+}
+
+#[cfg(test)]
+mod scoped_clustering_tests {
+    use super::*;
+
+    fn emb(path: &str, v: Vec<f32>) -> FileEmbedding {
+        FileEmbedding {
+            path: path.to_string(),
+            embedding: v,
+            content_hash: String::new(),
+        }
+    }
+
+    #[test]
+    fn scope_of_path_handles_both_separators() {
+        assert_eq!(scope_of_path("code/a.rs"), "code");
+        assert_eq!(scope_of_path("code/sub/a.rs"), "code/sub");
+        // Windows-style separators must group identically to POSIX.
+        assert_eq!(scope_of_path("code\\sub\\a.rs"), "code/sub");
+        assert_eq!(scope_of_path("top.md"), ".");
+        // Parent of /abs/a.md is /abs; a file at the filesystem root gives "/".
+        assert_eq!(scope_of_path("/abs/a.md"), "/abs");
+        assert_eq!(scope_of_path("/a.md"), "/");
+    }
+
+    #[test]
+    fn centroid_of_empty_is_none_not_zero_vector() {
+        assert!(centroid_of(&[]).is_none());
+    }
+
+    #[test]
+    fn centroid_is_the_mean() {
+        let a = emb("a", vec![0.0, 2.0]);
+        let b = emb("b", vec![4.0, 6.0]);
+        let refs = vec![&a, &b];
+        let c = centroid_of(&refs).unwrap();
+        assert_eq!(c, vec![2.0, 4.0]);
+    }
+
+    #[test]
+    fn centroid_skips_dimension_mismatches() {
+        let a = emb("a", vec![1.0, 1.0]);
+        let b = emb("b", vec![3.0]); // wrong dim, must not panic
+        let refs = vec![&a, &b];
+        let c = centroid_of(&refs).unwrap();
+        assert_eq!(c.len(), 2);
+    }
+
+    #[test]
+    fn centroids_as_embeddings_keys_by_scope() {
+        let mut m = HashMap::new();
+        m.insert("code".to_string(), vec![1.0f32, 0.0]);
+        let v = centroids_as_embeddings(&m);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].path, "code");
+        assert_eq!(v[0].embedding, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn kmeans_rollup_clusters_centroids_not_vectors() {
+        // Two well-separated centroids must land in two drive clusters.
+        let mut m = HashMap::new();
+        m.insert("code".to_string(), vec![1.0f32, 0.0, 0.0, 0.0]);
+        m.insert("homework".to_string(), vec![0.0, 1.0, 0.0, 0.0]);
+        m.insert("photos".to_string(), vec![0.0, 0.0, 1.0, 0.0]);
+        let pseudo = centroids_as_embeddings(&m);
+        let clusters = kmeans_cluster(&pseudo, 3);
+        assert_eq!(clusters.len(), 3);
+        // Every scope must appear exactly once across the drive clusters.
+        let mut seen: Vec<String> = clusters
+            .iter()
+            .flat_map(|c| c.file_paths.clone())
+            .collect();
+        seen.sort();
+        assert_eq!(seen, vec!["code", "homework", "photos"]);
+    }
 }
 
