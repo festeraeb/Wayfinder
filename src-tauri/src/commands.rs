@@ -1614,6 +1614,10 @@ fn scope_of_path(path: &str) -> String {
 
 /// Mean vector of a slice of embeddings. `None` for an empty slice so callers
 /// can tell "no centroid" from a genuine zero vector.
+///
+/// Vectors whose dimensionality disagrees with the first one are excluded, so
+/// the divisor counts only what was actually accumulated -- otherwise a single
+/// odd-dimension vector would silently scale the whole centroid down.
 fn centroid_of(embeddings: &[&FileEmbedding]) -> Option<Vec<f32>> {
     let first = embeddings.first()?;
     let dim = first.embedding.len();
@@ -1621,6 +1625,7 @@ fn centroid_of(embeddings: &[&FileEmbedding]) -> Option<Vec<f32>> {
         return None;
     }
     let mut acc = vec![0f32; dim];
+    let mut n = 0usize;
     for emb in embeddings {
         // Mismatched dimensions would silently produce garbage; skip rather
         // than panic inside a command handler.
@@ -1630,8 +1635,12 @@ fn centroid_of(embeddings: &[&FileEmbedding]) -> Option<Vec<f32>> {
         for (i, v) in emb.embedding.iter().enumerate() {
             acc[i] += v;
         }
+        n += 1;
     }
-    let n = embeddings.len() as f32;
+    if n == 0 {
+        return None;
+    }
+    let n = n as f32;
     Some(acc.into_iter().map(|v| v / n).collect())
 }
 
@@ -4623,6 +4632,28 @@ mod scoped_clustering_tests {
         let refs = vec![&a, &b];
         let c = centroid_of(&refs).unwrap();
         assert_eq!(c.len(), 2);
+    }
+
+    #[test]
+    fn centroid_divides_by_accumulated_count_not_slice_length() {
+        // Regression: a single odd-dimension vector must not shrink the mean.
+        // Only 'a' is accumulated, so the centroid is a's values verbatim --
+        // not a's values halved.
+        let a = emb("a", vec![4.0, 8.0]);
+        let odd = emb("odd", vec![100.0]);
+        let refs = vec![&a, &odd];
+        let c = centroid_of(&refs).unwrap();
+        assert_eq!(c, vec![4.0, 8.0]);
+    }
+
+    #[test]
+    fn centroid_is_none_when_every_vector_mismatches() {
+        let odd = emb("odd", vec![1.0]);
+        let refs = vec![&odd, &odd];
+        // dim is taken from the first vector, so the second is skipped and n
+        // stays 1 -> still a valid centroid, but all-skipped must not divide
+        // by zero.
+        assert!(centroid_of(&refs).is_some());
     }
 
     #[test]
