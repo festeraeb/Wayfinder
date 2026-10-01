@@ -25,15 +25,35 @@ clustered, centroids correct, drive rollup groups them, `self.clusters`
 untouched, `cluster_hdbscan` still assigns + persists (backwards compatible),
 and empty / single-scope / sub-`min_cluster_size` / length-mismatch all behave.
 
-## The blocker for making this user-visible
+## The blocker for making this user-visible — RESOLVED
 
-**The Tauri app does not use the Python bridge.** `src-tauri/src/commands.rs`
-implements `create_clusters` natively (reads `embeddings.json`, calls
-`kmeans_cluster`). `md_scanner/tauri_bridge.py` is a parallel legacy path.
+Originally: "the Tauri app does not use the Python bridge." That was correct, and
+the Rust-first port now fixes it (commit `5f4da6f`).
 
-So `cluster_by_scope` is currently reachable from the **CLI**
-(`md_scanner/cli.py` calls `cluster_hdbscan`) but **not from the app**. To ship
-hierarchical clustering to users it has to be ported into `commands.rs`.
+`src-tauri/src/commands.rs` implements clustering natively (reads
+`embeddings.json`, calls `kmeans_cluster`). `md_scanner/tauri_bridge.py` is a
+legacy parallel path. So `cluster_by_scope` was reachable from the CLI but not
+from the app.
+
+`create_scoped_clusters` is now a real `#[tauri::command]` registered in
+`main.rs`, sitting alongside the existing flat `create_clusters`:
+
+- per-folder clusters are the source of truth
+- the drive-level view rolls up from **one centroid per folder**, never by
+  re-clustering every member vector — O(folders), not O(files)
+- `centroids_as_embeddings()` feeds the existing `kmeans_cluster` the centroid
+  matrix, so there is deliberately no second clustering algorithm
+- writes `scoped_clusters.json`; `clusters.json` is left untouched
+- folders smaller than `min_per_scope` are kept whole rather than dropped
+
+Verified with `cargo check` (exit 0) and 6 new unit tests. Full suite is
+29 passed / 3 failed; the 3 failures reproduce identically at the
+`wip/pre-hierarchical` baseline (checked in a clean worktree), so they are
+pre-existing and unrelated.
+
+### Still not wired
+The frontend never calls `create_scoped_clusters` yet — `ClusterPanel.tsx` and
+`src/services/tauri.ts` still only expose the flat path. That is the next step.
 
 ## Pre-existing bugs found (not introduced here)
 
@@ -59,6 +79,59 @@ formats:
 
 Guessing would have added another wrong assumption on top of the existing ones.
 The formats need reconciling before either bug is worth fixing.
+
+## Forge lane architecture (Cesar's design intent)
+
+Small models are gradeable and good at *one* thing. The point is to file
+singular specialists together rather than ask one model to do everything.
+
+```
+user (ADHD, several thoughts per sentence)
+  │
+  ▼
+translator      entry gate. Turns scattered intent into a structured action.
+                Ornith-1.5 here — its real strength. Becomes the code
+                specialist in the next stage.
+  │
+  ▼
+thinker         high-reasoning planner (qwq / hermes / others by task).
+                Thinks in JSON.
+  │        ┌─────┐
+  │        ▼     │
+  │    injector   small qwen, good with tools. Reads the thinker's output,
+  │        │      collects the REAL file paths, and feeds them back mid-thought
+  │        │      so the thinker stops guessing paths and actually reads code.
+  │        └─────┘
+  ▼
+corrector       small model. Guarantees JSON is well-formed and the handoff is
+                valid at the end of every round. Also holds stall / thinking-loop
+                breakers — LOCAL lanes only.
+  │
+  ▼
+code specialist writes the work, using the thinker's JSON plan plus the real
+  tool paths the corrector resolved (so it never simulates or invents them).
+  │
+  ▼
+reviewer / cargo check
+  builds, records errors, and when dual lanes run compares lane A and lane B
+  output (local vs NIM/blended) and picks the better one. Errors go back to
+  both lanes; the injector also searches for candidate fixes.
+  │
+  ├── fail ──► back to code specialist, pass 2 … up to 5 passes
+  │              (reviewer picks the best of each round for accuracy and
+  │               fit to the original request)
+  │
+  ├── still failing after 5 ──► large NIM or a human polisher
+  │
+  └── pass ──► judge (apex) grades completeness and judges each model at its job
+```
+
+Lane B mirrors lane A with different models, usually NIM. It may have its own
+thinker; a local thinker gets the same JSON handoff a local code specialist
+would, a NIM thinker gets only a corrector pass for JSON formatting.
+
+Key implication: **roles, not model names.** Swapping which model fills a role is
+a routing change and must be possible without a rewrite.
 
 ## Forge v3 usage notes
 
