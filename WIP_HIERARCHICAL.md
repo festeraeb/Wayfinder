@@ -80,6 +80,47 @@ formats:
 Guessing would have added another wrong assumption on top of the existing ones.
 The formats need reconciling before either bug is worth fixing.
 
+## Forge failure: /code silently produced nothing useful on a real task
+
+The `create_scoped_clusters` brief (a real task, with the real existing code
+quoted) came back after ~20 min as:
+
+```
+initial_code: [CODER ERROR]: error decoding response body: expected ident at line 1 column 2
+final:        [INTEGRATION ERROR]: error decoding response body: expected ident at line 1 column 2
+pipeline:     coder -> reviewer -> coder_integrate
+```
+
+Only the **reviewer** stage produced real output. Stage 1 (coder) and stage 3
+(integrate) both failed identically, so the whole run was wasted — and it
+failed *silently*, with a 200-shaped result.
+
+### The interesting part: the reviewer hallucinated through the error
+
+Because stage 1 failed, `initial_code` handed to the reviewer was the literal
+string `[CODER ERROR]: error decoding response body...`. The reviewer did not
+flag it. It confidently produced a complete, plausible `centroid()` and
+`cluster_by_scope()` implementation — review-stage code that was never produced
+by the coder, and which nothing ever verified.
+
+That is exactly the failure mode the corrector role exists to prevent: a stage
+received a malformed/erroring handoff and treated it as valid input. Forge has
+the corrector concept; it is not applied as a **contract check** on the
+coder→reviewer handoff. Any stage can be handed an error string and will
+happily reason about it.
+
+### Not the seat's fault
+
+`coder-lane-c4` returns proper JSON with `stream:false`
+(`content-type: application/json`, well-formed `chat.completion`). The decode
+failure is inside forge's own coder/integrate request handling, not the paddler
+lane. Reproducing it precisely needs a smaller repro than a one-liner.
+
+### Practical consequence for orchestration
+
+Do not trust `final` from `/code` without checking it is not an
+`[INTEGRATION ERROR]` / `[CODER ERROR]` string. Grep the output before using it.
+
 ## Forge lane architecture (Cesar's design intent)
 
 Small models are gradeable and good at *one* thing. The point is to file
