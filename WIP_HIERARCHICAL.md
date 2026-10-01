@@ -121,6 +121,86 @@ lane. Reproducing it precisely needs a smaller repro than a one-liner.
 Do not trust `final` from `/code` without checking it is not an
 `[INTEGRATION ERROR]` / `[CODER ERROR]` string. Grep the output before using it.
 
+## Forge review verdict: 1 of 5 findings held up
+
+Sent the scoped Rust code (192 lines) to `POST /code` with an explicit
+"hunt for logic errors, panics, silent wrongness; cargo check already
+passes" brief. Took ~20 min, 63 KB response.
+
+| # | Forge finding | Verdict |
+|---|---|---|
+| 1 | "Potential panic in `centroid_of`" | **False** — self-refuting; it concludes "the logic is safe from panics" |
+| 2 | `scope_of_path` returns `"C:"` for a drive root | **True** — cosmetic, fixed |
+| 3 | "Silent bug: `centroid_of` on empty slices" | **False** — self-refuting; walks through it and concludes "handled correctly" |
+| 4 | k-means runs with `k=2` on a 1-file folder | **False** — misread the control flow |
+| 5 | `scope_to_drive` uses the Vec index as the cluster id | **False** — `kmeans_cluster` sets `id: j` (centroid index) and skips empty clusters |
+
+Claim 4 is the instructive one. The source is:
+```rust
+if scoped.len() < min_per_scope { /* whole-folder cluster, no kmeans */ }
+else { kmeans_cluster(&scoped, k) }
+```
+so a 1-file folder can never reach `kmeans_cluster`. Forge reported it
+anyway, because the prompt asked for a numbered list of defects and it
+produced five rather than saying "I found nothing".
+
+Claim 2 was real and worth having: `scope_of_path("C:/file.txt")` returned
+`"C:"`, so a Windows drive root rendered as a bare drive letter while the
+POSIX root rendered as `"/"`. Now normalised to `"C:/"` with a regression
+test.
+
+**Also still true: stage 3 (`coder_integrate`) failed again** with
+`[INTEGRATION ERROR]: error decoding response body`. The `review` field was
+populated; `final` was not. Two runs in a row now.
+
+Net: forge's reviewer manufactures findings under a "find bugs" prompt
+rather than reporting honestly. It needs a "say none found if none found"
+instruction, and ideally a judge that scores whether findings reproduce —
+which is exactly the apex role's job.
+
+## Root cause of the silent /code failures — FIXED
+
+The `[INTEGRATION ERROR]: error decoding response body` and the empty reply
+(`curl` exit 52) were **not** a seat problem and **not** a decode problem. Forge
+was panicking:
+
+```
+thread 'tokio-rt-worker' panicked at src/main.rs:2546:41:
+end byte index 2000 is not a char boundary; it is inside '니' (bytes 1998..2001 of string)
+```
+
+`main.rs` truncated model output with `&review[..2000]`. Rust indexes `&str` by
+**bytes**, so any multi-byte character straddling the cut point panics. The
+worker aborts, and the client sees an empty reply instead of a response.
+
+`coder-lane-c4` was innocent — it returns well-formed JSON every time.
+
+Fix: `routing::truncate_str()` walks back to the nearest char boundary. Applied
+to **all 29 byte-index slices across 8 files**, not just the one that fired.
+`cargo build --release` exit 0; forge restarted on PID 2918646.
+
+### Proof, both directions
+
+| | before fix | after fix |
+|---|---|---|
+| Impossible-task run | `curl` exit 52, empty reply | 6416 bytes, all stages real |
+| `initial_code` / `final` | error strings / empty | real content (428 / 299 chars) |
+| Behaviour | worker died mid-request | correctly refused the task |
+
+### Error-injection test result
+
+Sent a deliberately contradictory task (require a compile error in `main.rs`
+*and* forbid modifying any existing file). Forge answered:
+
+> The task is not satisfiable. Requirement 4 demands introducing a gate (and a
+> compile error) in `main.rs`, which requires modifying that file, while
+> requirement 5 explicitly forbids modifying any existing file.
+
+So the loop does recognise unsatisfiable work — the earlier "hallucinated
+through the error" behaviour happened because the input *was* an error string
+that the pipeline failed to mark as one. With the panic fixed the stages
+receive real content and behave.
+
 ## Forge lane architecture (Cesar's design intent)
 
 Small models are gradeable and good at *one* thing. The point is to file
