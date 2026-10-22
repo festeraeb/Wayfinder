@@ -231,6 +231,14 @@ export const tauriService = {
         return invoke("get_file_events", { clear });
     },
 
+    async getSavePrompts(clear?: boolean): Promise<Types.SavePromptsResponse> {
+        return invoke("get_save_prompts", { clear });
+    },
+
+    async setSaveStrictness(level: number): Promise<{ success: boolean; strictness: number }> {
+        return invoke("set_save_strictness", { level });
+    },
+
     async getWatcherStatus(): Promise<Types.WatcherStatus> {
         return invoke("get_watcher_status");
     },

@@ -221,6 +221,22 @@ export interface FileEventsResponse {
     events: FileEvent[];
 }
 
+// Save prompter (Mr. Clippy): one prompt for a messy save.
+export interface SavePrompt {
+    path: string;
+    reasons: string[];
+    suggested_name: string;
+    line: string;
+    level: number;
+}
+
+export interface SavePromptsResponse {
+    success: boolean;
+    count: number;
+    prompts: SavePrompt[];
+    strictness: number;
+}
+
 export interface WatcherStatus {
     success: boolean;
     is_running: boolean;

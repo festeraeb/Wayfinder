@@ -4,6 +4,7 @@ import { useTheme } from "./hooks/useTauri";
 import { open } from "@tauri-apps/plugin-dialog";
 import { GitAssistant } from "./components/GitAssistant";
 import { NautiClippy } from "./components/NautiClippy";
+import SavePromptToast from "./components/notifications/SavePromptToast";
 import { useFileWatcher } from "./hooks/useFileWatcher";
 import { useNotifications } from "./components/notifications/NotificationProvider";
 import Modal from "./components/Modal";
@@ -830,6 +831,7 @@ export default function App() {
 
     return (
         <div className="app-container">
+            <SavePromptToast active={watcherActive} />
             {/* Sidebar Navigation */}
             <aside className="sidebar">
                 <div className="sidebar-header">

@@ -9,3 +9,4 @@ export { LearningModeApp, SessionSummary } from "./LearningModeApp";
 export { NotificationProvider, useNotifications } from "./notifications/NotificationProvider";
 export { default as SuggestionPanel } from "./notifications/SuggestionPanel";
 export { default as WatcherStatusBadge } from "./notifications/WatcherStatusBadge";
+export { default as SavePromptToast } from "./notifications/SavePromptToast";
