@@ -1,0 +1,10 @@
+[package]
+name = "wayfinder-local-insights"
+version = "0.1.0"
+edition = "2021"
+description = "On-device request classification and opt-in aggregate metrics for Wayfinder: text never leaves the device"
+
+[dependencies]
+
+# Standalone crate: keep cargo from looking for a parent workspace.
+[workspace]
