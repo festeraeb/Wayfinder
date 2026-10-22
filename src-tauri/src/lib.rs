@@ -4,6 +4,7 @@ pub mod git_assistant;
 pub mod file_intelligence;
 pub mod pattern_database;
 pub mod file_watcher;
+pub mod save_prompter_bridge;
 
 #[cfg(test)]
 mod windows_deployment_tests;
