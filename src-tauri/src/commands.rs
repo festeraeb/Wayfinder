@@ -280,6 +280,11 @@ impl Default for EmbeddingJobConfig {
     }
 }
 
+// Default endpoint for the local Lemonade server (AMD), which serves OpenAI-style embeddings.
+const LEMONADE_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:13305/api";
+// Default embedding model served by Lemonade.
+const LEMONADE_DEFAULT_EMBED_MODEL: &str = "nomic-embed-text-v1-GGUF";
+
 fn default_local_model_name() -> String {
     "embeddinggemma-300m-f16".to_string()
 }
@@ -312,10 +317,11 @@ fn resolve_provider_config(index_path: &Path) -> ProviderConfig {
         return config;
     }
 
+    // No provider_config.json yet: default to the local Lemonade server.
     ProviderConfig {
         provider: EmbeddingProvider::Llama,
-        local_model: Some(default_local_model_name()),
-        local_endpoint: Some("http://localhost:5002".to_string()),
+        local_model: Some(LEMONADE_DEFAULT_EMBED_MODEL.to_string()),
+        local_endpoint: Some(LEMONADE_DEFAULT_ENDPOINT.to_string()),
     }
 }
 
@@ -2872,17 +2878,29 @@ pub async fn save_provider_config(
         return Err(format!("Index path not found: {}", index_dir));
     }
 
-    let provider_enum = match provider.to_lowercase().as_str() {
+    let provider_key = provider.to_lowercase();
+    // "lemonade" is an alias for the Llama provider (same OpenAI-style API),
+    // but with Lemonade's own default endpoint/model.
+    let is_lemonade = provider_key == "lemonade";
+
+    let provider_enum = match provider_key.as_str() {
         "local" => EmbeddingProvider::Local,
-        "llama" | "local_llama" | "local_gpu" => EmbeddingProvider::Llama,
+        "llama" | "local_llama" | "local_gpu" | "lemonade" => EmbeddingProvider::Llama,
         "azure" => EmbeddingProvider::Azure,
         "gcp" => EmbeddingProvider::Gcp,
-        _ => return Err("Unknown provider. Use 'local', 'llama', 'azure', or 'gcp'.".to_string()),
+        _ => return Err("Unknown provider. Use 'local', 'llama', 'lemonade', 'azure', or 'gcp'.".to_string()),
     };
 
     let model = match provider_enum {
         EmbeddingProvider::Local => Some(local_model.unwrap_or_else(default_local_model_name)),
-        EmbeddingProvider::Llama => local_model.or_else(|| Some("embeddinggemma-300m-f16".to_string())),
+        EmbeddingProvider::Llama => {
+            if is_lemonade {
+                let trimmed = local_model.unwrap_or_default().trim().to_string();
+                if trimmed.is_empty() { Some(LEMONADE_DEFAULT_EMBED_MODEL.to_string()) } else { Some(trimmed) }
+            } else {
+                local_model.or_else(|| Some("embeddinggemma-300m-f16".to_string()))
+            }
+        },
         EmbeddingProvider::Azure => local_model.clone(),
         EmbeddingProvider::Gcp => local_model,
     };
@@ -2890,7 +2908,9 @@ pub async fn save_provider_config(
     let endpoint = match provider_enum {
         EmbeddingProvider::Llama => {
             let trimmed = local_endpoint.unwrap_or_default().trim().to_string();
-            if trimmed.is_empty() { Some("http://localhost:5002".to_string()) } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                if is_lemonade { Some(LEMONADE_DEFAULT_ENDPOINT.to_string()) } else { Some("http://localhost:5002".to_string()) }
+            } else { Some(trimmed) }
         },
         _ => local_endpoint,
     };
@@ -4702,6 +4722,38 @@ mod scoped_clustering_tests {
             .collect();
         seen.sort();
         assert_eq!(seen, vec!["code", "homework", "photos"]);
+    }
+
+    /// Unique, empty directory under the system temp dir so tests don't
+    /// collide with each other or with a real index.
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("wayfinder_test_{}_{}", tag, nanos));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn lemonade_default_when_no_config() {
+        let dir = unique_temp_dir("lemonade_no_config");
+        let cfg = resolve_provider_config(&dir);
+        assert_eq!(cfg.provider, EmbeddingProvider::Llama);
+        assert_eq!(cfg.local_endpoint.as_deref(), Some(LEMONADE_DEFAULT_ENDPOINT));
+        assert_eq!(cfg.local_model.as_deref(), Some(LEMONADE_DEFAULT_EMBED_MODEL));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lemonade_default_keeps_existing_config() {
+        let dir = unique_temp_dir("lemonade_existing_config");
+        write_provider_config(&dir, EmbeddingProvider::Azure, None, None).unwrap();
+        let cfg = resolve_provider_config(&dir);
+        assert_eq!(cfg.provider, EmbeddingProvider::Azure);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 
