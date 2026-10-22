@@ -3,7 +3,7 @@
 pub use wayfinder_save_prompter as sp;
 
 use sp::backoff::Backoff;
-use sp::{hints, naming};
+use sp::{clippy, hints, naming};
 
 /// What the UI needs to show one save prompt.
 #[derive(Debug, Clone, serde::Serialize, PartialEq)]
@@ -12,6 +12,8 @@ pub struct SavePrompt {
     /// Hint names, e.g. "PlaceholderName".
     pub reasons: Vec<String>,
     pub suggested_name: String,
+    /// What Mr. Clippy says (sarcastic about the file, softer as the folder's level rises).
+    pub line: String,
     /// Back-off level of the folder before this save (0 = no streak yet), for Clippy's tone.
     pub level: u8,
 }
@@ -52,6 +54,7 @@ pub fn evaluate_save(
         path: path.to_string(),
         reasons: reasons.iter().map(|r| format!("{:?}", r)).collect(),
         suggested_name: naming::suggest_name(name, strictness, date),
+        line: clippy::clippy_line(&reasons, level, save_index).to_string(),
         level,
     })
 }
@@ -192,6 +195,7 @@ mod tests {
         assert_eq!(p.suggested_name, "untitled.docx");
         assert_eq!(p.path, DOWNLOADS_UNTITLED);
         assert_eq!(p.level, 0);
+        assert!(!p.line.is_empty());
     }
 
     #[test]
