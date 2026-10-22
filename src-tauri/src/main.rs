@@ -58,6 +58,8 @@ fn main() {
             commands::get_file_events,
             commands::get_watcher_status,
             commands::get_file_suggestions,
+            wayfinder_tauri::save_prompter_bridge::get_save_prompts,
+            wayfinder_tauri::save_prompter_bridge::set_save_strictness,
             commands::validate_azure_config,
             commands::validate_gcp_config,
             commands::validate_all_azure_configs,

@@ -56,9 +56,118 @@ pub fn evaluate_save(
     })
 }
 
+/// Live save-prompter state for the running app: one back-off ledger, the running save count,
+/// the user's strictness and the prompts waiting for the UI.
+#[derive(Debug)]
+pub struct SavePrompterState {
+    pub backoff: Backoff,
+    pub save_index: u64,
+    pub strictness: u8,
+    pub prompts: Vec<SavePrompt>,
+}
+
+impl Default for SavePrompterState {
+    fn default() -> Self {
+        Self { backoff: Backoff::default(), save_index: 0, strictness: 2, prompts: Vec::new() }
+    }
+}
+
+/// Most prompts kept for the UI; older ones drop off the front.
+const MAX_PENDING_PROMPTS: usize = 50;
+
+pub static SAVE_STATE: once_cell::sync::Lazy<std::sync::Mutex<SavePrompterState>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(SavePrompterState::default()));
+
+/// Feed one save from the file watcher through the prompter, queueing a prompt if it earns one.
+pub fn on_save_event(state: &mut SavePrompterState, path: &str, date: Option<&str>) {
+    let index = state.save_index;
+    state.save_index += 1;
+    let strictness = state.strictness;
+    if let Some(prompt) = evaluate_save(path, strictness, &mut state.backoff, index, date) {
+        state.prompts.push(prompt);
+        if state.prompts.len() > MAX_PENDING_PROMPTS {
+            state.prompts.remove(0);
+        }
+    }
+}
+
+/// Pending save prompts for the UI (optionally cleared once read).
+#[tauri::command]
+pub async fn get_save_prompts(clear: Option<bool>) -> Result<serde_json::Value, String> {
+    let mut state = SAVE_STATE.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let prompts = state.prompts.clone();
+    if clear.unwrap_or(false) {
+        state.prompts.clear();
+    }
+    Ok(serde_json::json!({ "success": true, "count": prompts.len(), "prompts": prompts, "strictness": state.strictness }))
+}
+
+/// Set the naming strictness (0-3, higher values are clamped by the naming rules).
+#[tauri::command]
+pub async fn set_save_strictness(level: u8) -> Result<serde_json::Value, String> {
+    let mut state = SAVE_STATE.lock().map_err(|e| format!("Lock error: {}", e))?;
+    state.strictness = level.min(3);
+    Ok(serde_json::json!({ "success": true, "strictness": state.strictness }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn on_save_event_counts_saves_and_queues_only_prompts() {
+        let mut st = SavePrompterState::default();
+        on_save_event(&mut st, "/home/sam/school/cell-notes.md", Some("2026-10-22"));
+        assert!(st.prompts.is_empty());
+        on_save_event(&mut st, "/home/sam/Downloads/Untitled.docx", Some("2026-10-22"));
+        assert_eq!(st.save_index, 2);
+        assert_eq!(st.prompts.len(), 1);
+        assert_eq!(st.prompts[0].suggested_name, "untitled.docx");
+        st.strictness = 3;
+        on_save_event(&mut st, "/home/sam/Desktop/Lab Report (2).docx", Some("2026-10-22"));
+        assert_eq!(st.prompts[1].suggested_name, "2026-10-22-lab-report.docx");
+    }
+
+    /// End to end through the real watcher: a new placeholder file in a Downloads folder becomes a prompt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_watcher_turns_a_save_into_a_prompt() {
+        let root = std::env::temp_dir().join(format!("wf-watch-{}", std::process::id()));
+        let downloads = root.join("Downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        crate::commands::start_file_watcher(Some(vec![downloads.to_string_lossy().to_string()]))
+            .await
+            .expect("watcher starts");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let file = downloads.join("Untitled (3).docx");
+        std::fs::write(&file, b"enzyme lab notes").unwrap();
+
+        let want = file.to_string_lossy().to_string();
+        let mut found = None;
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let st = SAVE_STATE.lock().unwrap();
+            if let Some(p) = st.prompts.iter().find(|p| p.path == want) {
+                found = Some(p.clone());
+                break;
+            }
+        }
+        let _ = crate::commands::stop_file_watcher().await;
+        let _ = std::fs::remove_dir_all(&root);
+        let p = found.expect("the watcher queued a prompt for the new file");
+        assert!(p.reasons.contains(&"DumpingGround".to_string()));
+        assert!(p.reasons.contains(&"PlaceholderName".to_string()));
+        assert!(p.suggested_name.ends_with("untitled.docx"), "{}", p.suggested_name);
+    }
+
+    #[test]
+    fn pending_prompts_are_capped() {
+        let mut st = SavePrompterState::default();
+        for i in 0..(MAX_PENDING_PROMPTS + 7) {
+            on_save_event(&mut st, &format!("/tmp/f{i}/Untitled.txt"), None);
+        }
+        assert_eq!(st.prompts.len(), MAX_PENDING_PROMPTS);
+        assert_eq!(st.prompts[0].path, "/tmp/f7/Untitled.txt");
+    }
 
     const DOWNLOADS_UNTITLED: &str = "C:\\Users\\sam\\Downloads\\Untitled (2).docx";
 

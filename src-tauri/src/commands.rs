@@ -3899,6 +3899,18 @@ pub async fn start_file_watcher(watch_paths: Option<Vec<String>>) -> Result<serd
                 if e.len() > 100 { e.remove(0); }
             }
 
+            // A new file or a rename is a save the save prompter judges (plain re-saves of the same
+            // file are left alone so Clippy does not nag on every Ctrl+S).
+            if matches!(
+                event.event_type,
+                crate::file_watcher::FileEventType::Created | crate::file_watcher::FileEventType::Renamed { .. }
+            ) {
+                if let Ok(mut st) = crate::save_prompter_bridge::SAVE_STATE.lock() {
+                    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                    crate::save_prompter_bridge::on_save_event(&mut st, &event.path, Some(&today));
+                }
+            }
+
             // Generate organization suggestions for this event
             if let Ok(doc) = std::panic::catch_unwind(|| event_to_document(&event)) {
                 let doc = doc;
