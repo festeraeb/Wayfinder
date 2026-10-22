@@ -3622,13 +3622,80 @@ pub async fn delete_duplicate_files(file_paths: Vec<String>) -> Result<serde_jso
     }))
 }
 
+/// Locate `lemonade_config.json` in the global config directory.
+///
+/// `crate::vertex_ai::get_global_config_dir` is private, so this mirrors its
+/// intent without touching that module: prefer the platform config dir
+/// (`APPDATA` on Windows, `$HOME/.config/wayfinder` elsewhere) and fall back
+/// to the legacy `$HOME/.wayfinder` location. Returns `None` when no candidate
+/// exists, which the caller treats as "no config file".
+fn lemonade_config_path() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let appdata = appdata.trim();
+        if !appdata.is_empty() {
+            candidates.push(Path::new(appdata).join("wayfinder").join("lemonade_config.json"));
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        let home = home.trim();
+        if !home.is_empty() {
+            candidates.push(Path::new(home).join(".config").join("wayfinder").join("lemonade_config.json"));
+            candidates.push(Path::new(home).join(".wayfinder").join("lemonade_config.json"));
+        }
+    }
+
+    candidates.into_iter().find(|p| p.exists())
+}
+
+/// Resolve the URL, model and auth header for a chat request.
+///
+/// An explicitly passed `endpoint` or `model` always wins over `target`; only
+/// the missing pieces fall back to the resolved target. The target case uses
+/// `llm_config::chat_url`, while an explicit endpoint is normalised so a
+/// trailing `/v1` is not doubled.
+pub(crate) fn chat_request_parts(
+    endpoint: Option<String>,
+    model: Option<String>,
+    target: &crate::llm_config::LlmTarget,
+) -> (String, String, Option<String>) {
+    let url = match endpoint {
+        Some(raw) => {
+            let base = raw.trim().trim_end_matches('/');
+            // The caller may already include the "/v1" suffix; drop it so we
+            // never build ".../v1/v1/chat/completions".
+            let base = base.strip_suffix("/v1").unwrap_or(base);
+            format!("{}/v1/chat/completions", base.trim_end_matches('/'))
+        }
+        None => crate::llm_config::chat_url(target),
+    };
+
+    let model = model.unwrap_or_else(|| target.model.clone());
+    // The configured key belongs to the configured server: only send it when the request goes there.
+    let auth = if url == crate::llm_config::chat_url(target) {
+        crate::llm_config::auth_header(target)
+    } else {
+        None
+    };
+
+    (url, model, auth)
+}
+
 /// Lightweight local chat via llama.cpp server (OpenAI-compatible)
 #[tauri::command]
 pub async fn chat_llama(prompt: String, model: Option<String>, endpoint: Option<String>) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
-    let base = endpoint.unwrap_or_else(|| "http://localhost:5001".to_string());
-    let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
-    let model_name = model.unwrap_or_else(|| "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf".to_string());
+
+    // Resolve the chat target from env vars and lemonade_config.json; an
+    // explicitly passed endpoint/model still wins inside chat_request_parts.
+    let config_text = lemonade_config_path().and_then(|p| fs::read_to_string(p).ok());
+    let target = crate::llm_config::resolve_chat_target(
+        &|k| std::env::var(k).ok(),
+        config_text.as_deref(),
+    );
+    let (url, model_name, auth) = chat_request_parts(endpoint, model, &target);
 
     let payload = serde_json::json!({
         "model": model_name,
@@ -3640,7 +3707,12 @@ pub async fn chat_llama(prompt: String, model: Option<String>, endpoint: Option<
         "max_tokens": 256
     });
 
-    let resp = client.post(&url).json(&payload).send().await
+    let mut request = client.post(&url).json(&payload);
+    if let Some(header) = auth {
+        request = request.header("Authorization", header);
+    }
+
+    let resp = request.send().await
         .map_err(|e| format!("Request failed: {}", e))?;
     let status = resp.status();
     if !status.is_success() {
@@ -4754,6 +4826,71 @@ mod scoped_clustering_tests {
         let cfg = resolve_provider_config(&dir);
         assert_eq!(cfg.provider, EmbeddingProvider::Azure);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn llm_target(base: &str, model: &str, api_key: Option<&str>) -> crate::llm_config::LlmTarget {
+        crate::llm_config::LlmTarget {
+            base: base.to_string(),
+            model: model.to_string(),
+            api_key: api_key.map(|k| k.to_string()),
+        }
+    }
+
+    #[test]
+    fn chat_request_parts_explicit_endpoint_and_model_win() {
+        let target = llm_target("http://resolved:1", "resolved-model", Some("secret"));
+        let (url, model, auth) = chat_request_parts(
+            Some("http://explicit:2".to_string()),
+            Some("explicit-model".to_string()),
+            &target,
+        );
+        assert_eq!(url, "http://explicit:2/v1/chat/completions");
+        assert_eq!(model, "explicit-model");
+        // The configured key belongs to the configured server; never send it elsewhere.
+        assert_eq!(auth, None);
+    }
+
+    #[test]
+    fn chat_request_parts_keeps_key_for_the_configured_server() {
+        let target = llm_target("http://resolved:1", "resolved-model", Some("secret"));
+        let (_, _, auth) =
+            chat_request_parts(Some("http://resolved:1/v1/".to_string()), None, &target);
+        assert_eq!(auth, Some("Bearer secret".to_string()));
+    }
+
+    #[test]
+    fn chat_request_parts_none_falls_back_to_target() {
+        let target = llm_target("http://resolved:1", "resolved-model", None);
+        let (url, model, auth) = chat_request_parts(None, None, &target);
+        assert_eq!(url, "http://resolved:1/v1/chat/completions");
+        assert_eq!(model, "resolved-model");
+        assert_eq!(auth, None);
+    }
+
+    #[test]
+    fn chat_request_parts_explicit_endpoint_with_v1_does_not_double() {
+        let target = llm_target("http://resolved:1", "resolved-model", None);
+
+        let (url, _, _) =
+            chat_request_parts(Some("http://explicit:2/v1".to_string()), None, &target);
+        assert_eq!(url, "http://explicit:2/v1/chat/completions");
+
+        // A trailing slash after "/v1" must not reintroduce the duplicate.
+        let (url, _, _) =
+            chat_request_parts(Some("http://explicit:2/v1/".to_string()), None, &target);
+        assert_eq!(url, "http://explicit:2/v1/chat/completions");
+
+        // A plain trailing slash is still normalised.
+        let (url, _, _) =
+            chat_request_parts(Some("http://explicit:2/".to_string()), None, &target);
+        assert_eq!(url, "http://explicit:2/v1/chat/completions");
+    }
+
+    #[test]
+    fn chat_request_parts_passes_auth_header_through() {
+        let target = llm_target("http://resolved:1", "resolved-model", Some("abc123"));
+        let (_, _, auth) = chat_request_parts(None, None, &target);
+        assert_eq!(auth, Some("Bearer abc123".to_string()));
     }
 }
 
