@@ -1,6 +1,7 @@
 [package]
 name = "wayfinder-save-prompter"
 version = "0.1.0"
+license = "Apache-2.0"
 edition = "2021"
 description = "Pure logic for Wayfinder's save prompter: save hints, back-off, file-name suggestions and commit nudges"
 
