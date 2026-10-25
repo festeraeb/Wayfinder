@@ -717,6 +717,18 @@ pub async fn generate_embeddings_local(_index_dir: String, _max_files: Option<us
     }))
 }
 
+/// Longest prefix of `s` that fits in `max_bytes` and ends on a char boundary.
+pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Generate embeddings via local llama.cpp HTTP server
 pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usize>, batch_size: Option<usize>, endpoint: Option<String>, model_name: Option<String>) -> Result<serde_json::Value, String> {
     let index_path = Path::new(&index_dir);
@@ -796,7 +808,7 @@ pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usiz
                 Ok(c) => c,
                 Err(_) => { skipped_count += 1; continue; }
             };
-            let truncated = if content.len() > 8000 { &content[..8000] } else { content };
+            let truncated = truncate_utf8(content, 8000);
 
             let payload = serde_json::json!({
                 "model": model,
@@ -1306,7 +1318,7 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
             }
 
             // Trim to avoid context issues
-            let truncated_content = if content.len() > 8000 { content[..8000].to_string() } else { content.clone() };
+            let truncated_content = truncate_utf8(&content, 8000).to_string();
 
             let content_hash = format!("{:x}", md5_hash(&truncated_content));
 
