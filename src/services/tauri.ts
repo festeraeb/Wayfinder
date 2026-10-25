@@ -239,6 +239,15 @@ export const tauriService = {
         return invoke("set_save_strictness", { level });
     },
 
+    // L-con: the sarcasm slider sets the chat contract's tone and caps Mr. Clippy's
+    async setInteractionSettings(sarcasmLevel: number): Promise<{ success: boolean; sarcasm_level: number }> {
+        return invoke("set_interaction_settings", { sarcasmLevel });
+    },
+
+    async getChatContract(): Promise<{ sarcasm_level: number; prompt: string; chars: number; est_tokens: number }> {
+        return invoke("get_chat_contract");
+    },
+
     async getWatcherStatus(): Promise<Types.WatcherStatus> {
         return invoke("get_watcher_status");
     },

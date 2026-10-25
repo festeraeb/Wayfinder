@@ -60,6 +60,8 @@ fn main() {
             commands::get_file_suggestions,
             wayfinder_tauri::save_prompter_bridge::get_save_prompts,
             wayfinder_tauri::save_prompter_bridge::set_save_strictness,
+            wayfinder_tauri::lcon::set_interaction_settings,
+            wayfinder_tauri::lcon::get_chat_contract,
             commands::validate_azure_config,
             commands::validate_gcp_config,
             commands::validate_all_azure_configs,

@@ -5,6 +5,7 @@ pub mod file_intelligence;
 pub mod pattern_database;
 pub mod file_watcher;
 pub mod llm_config;
+pub mod lcon;
 pub mod save_prompter_bridge;
 pub mod lemonade_check;
 pub mod embedder_id;

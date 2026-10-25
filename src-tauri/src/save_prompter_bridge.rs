@@ -54,7 +54,8 @@ pub fn evaluate_save(
         path: path.to_string(),
         reasons: reasons.iter().map(|r| format!("{:?}", r)).collect(),
         suggested_name: naming::suggest_name(name, strictness, date),
-        line: clippy::clippy_line(&reasons, level, save_index).to_string(),
+        // The sarcasm slider caps Clippy's tone; good habits (level) can only soften it further.
+        line: clippy::clippy_line(&reasons, clippy::effective_level(level, crate::lcon::sarcasm()), save_index).to_string(),
         level,
     })
 }
