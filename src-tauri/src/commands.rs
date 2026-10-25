@@ -808,22 +808,36 @@ pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usiz
                 Ok(c) => c,
                 Err(_) => { skipped_count += 1; continue; }
             };
-            let truncated = truncate_utf8(content, 8000);
+            let mut truncated = truncate_utf8(content, 8000);
 
-            let payload = serde_json::json!({
-                "model": model,
-                "input": truncated,
-            });
-
-            match client.post(&url).json(&payload).send().await {
-                Ok(resp) => {
-                    let status = resp.status();
-                    if !status.is_success() {
+            // Stock Lemonade rejects inputs over its physical batch (512 tokens) with
+            // "too large to process": retry the same file with half the text, up to 4 times.
+            let mut retries = 0;
+            let sent = loop {
+                let payload = serde_json::json!({
+                    "model": model,
+                    "input": truncated,
+                });
+                match client.post(&url).json(&payload).send().await {
+                    Ok(resp) if !resp.status().is_success() => {
+                        let status = resp.status();
                         let err_text = resp.text().await.unwrap_or_default();
+                        if err_text.contains("too large to process") && retries < 4 {
+                            retries += 1;
+                            truncated = truncate_utf8(truncated, truncated.len() / 2);
+                            continue;
+                        }
                         error_count += 1;
                         log_error(index_path, "llama_api_error", Some(&file.path), &err_text, Some(&status.as_u16().to_string()));
-                        continue;
+                        break None;
                     }
+                    other => break Some(other),
+                }
+            };
+            let Some(sent) = sent else { continue };
+
+            match sent {
+                Ok(resp) => {
                     match resp.json::<serde_json::Value>().await {
                         Ok(json) => {
                             if let Some(arr) = json.get("data").and_then(|d| d.get(0)).and_then(|d| d.get("embedding")) {
