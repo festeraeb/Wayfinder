@@ -221,3 +221,7 @@ Contributions welcome! Please open an issue or PR.
 ---
 
 Made with ❤️ by NautiDog
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
