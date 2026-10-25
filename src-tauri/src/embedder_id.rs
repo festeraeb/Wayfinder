@@ -23,14 +23,19 @@ pub struct EmbedderId {
 
 /// Parse a Lemonade "checkpoint" string ("<repo>:<quant>").
 pub fn from_checkpoint(checkpoint: &str) -> Option<EmbedderId> {
-    let _ = checkpoint;
-    todo!("WF14")
+    let (repo, quant) = checkpoint.trim().rsplit_once(':')?;
+    let (repo, quant) = (repo.trim(), quant.trim());
+    if repo.is_empty() || quant.is_empty() {
+        return None;
+    }
+    Some(EmbedderId { repo: repo.to_string(), quant: quant.to_string() })
 }
 
 /// True when vectors from `a` and `b` may be mixed in one index.
 pub fn can_mix(a: &EmbedderId, b: &EmbedderId) -> bool {
-    let _ = (a, b);
-    todo!("WF14")
+    a.repo.eq_ignore_ascii_case(&b.repo)
+        && a.quant.eq_ignore_ascii_case(&b.quant)
+        && MIXABLE_QUANTS.iter().any(|q| q.eq_ignore_ascii_case(&a.quant))
 }
 
 #[cfg(test)]

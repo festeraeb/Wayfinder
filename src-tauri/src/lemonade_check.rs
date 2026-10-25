@@ -33,15 +33,140 @@ pub struct LemonadeReport {
 impl LemonadeReport {
     /// True only when every step was checked and passed.
     pub fn all_ok(&self) -> bool {
-        todo!("WF13")
+        self.models_ok
+            && self.chat_model_present
+            && self.chat_model_downloaded
+            && self.embed_model_present
+            && self.embed_model_downloaded
+            && self.embed_dim.map_or(false, |d| d > 0)
+            && self.chat_reply.as_deref().map_or(false, |r| !r.trim().is_empty())
+            && self.problems.is_empty()
+    }
+}
+
+/// "http://host/api/v1/" -> "http://host/api".
+fn normalise_base(base: &str) -> String {
+    let b = base.trim().trim_end_matches('/');
+    let b = b.strip_suffix("/v1").unwrap_or(b);
+    b.trim_end_matches('/').to_string()
+}
+
+/// Look up `name` in the /v1/models "data" array: (present, downloaded, checkpoint).
+/// A missing "downloaded" field counts as downloaded (non-Lemonade servers omit it).
+fn find_model(data: &[serde_json::Value], name: &str) -> (bool, bool, Option<String>) {
+    match data.iter().find(|m| m.get("id").and_then(|v| v.as_str()) == Some(name)) {
+        Some(m) => (
+            true,
+            m.get("downloaded").and_then(|v| v.as_bool()).unwrap_or(true),
+            m.get("checkpoint").and_then(|v| v.as_str()).map(str::to_string),
+        ),
+        None => (false, false, None),
     }
 }
 
 /// Run the check. Never panics and never returns Err: failures go into
 /// `problems`.
 pub async fn check_lemonade(base: &str, chat_model: &str, embed_model: &str) -> LemonadeReport {
-    let _ = (base, chat_model, embed_model);
-    todo!("WF13")
+    let base = normalise_base(base);
+    let client = reqwest::Client::new();
+    let mut report = LemonadeReport {
+        models_ok: false,
+        chat_model_present: false,
+        chat_model_downloaded: false,
+        embed_model_present: false,
+        embed_model_downloaded: false,
+        embed_checkpoint: None,
+        embed_dim: None,
+        chat_reply: None,
+        problems: Vec::new(),
+    };
+
+    let resp = match client.get(format!("{}/v1/models", base)).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            report.problems.push(format!("Lemonade not reachable at {}: {}", base, e));
+            return report;
+        }
+    };
+    if !resp.status().is_success() {
+        report.problems.push(format!("GET /v1/models returned {}", resp.status()));
+        return report;
+    }
+    let data = match resp.json::<serde_json::Value>().await {
+        Ok(json) => match json.get("data").and_then(|d| d.as_array()) {
+            Some(d) => d.clone(),
+            None => {
+                report.problems.push("GET /v1/models answered without a \"data\" list".to_string());
+                return report;
+            }
+        },
+        Err(e) => {
+            report.problems.push(format!("GET /v1/models did not return JSON: {}", e));
+            return report;
+        }
+    };
+    report.models_ok = true;
+
+    let (present, downloaded, _) = find_model(&data, chat_model);
+    report.chat_model_present = present;
+    report.chat_model_downloaded = downloaded;
+    if !present {
+        report.problems.push(format!("chat model {} is not listed", chat_model));
+    } else if !downloaded {
+        report.problems.push(format!("chat model {} is not downloaded", chat_model));
+    }
+
+    let (present, downloaded, checkpoint) = find_model(&data, embed_model);
+    report.embed_model_present = present;
+    report.embed_model_downloaded = downloaded;
+    report.embed_checkpoint = checkpoint;
+    if !present {
+        report.problems.push(format!("embedding model {} is not listed", embed_model));
+    } else if !downloaded {
+        report.problems.push(format!("embedding model {} is not downloaded", embed_model));
+    }
+
+    if report.embed_model_present && report.embed_model_downloaded {
+        let body = serde_json::json!({"model": embed_model, "input": "Wayfinder setup check"});
+        match client.post(format!("{}/v1/embeddings", base)).json(&body).send().await {
+            Ok(r) if r.status().is_success() => {
+                let dim = r.json::<serde_json::Value>().await.ok().and_then(|j| {
+                    j.pointer("/data/0/embedding").and_then(|e| e.as_array()).map(|e| e.len())
+                });
+                match dim {
+                    Some(d) if d > 0 => report.embed_dim = Some(d),
+                    _ => report.problems.push("POST /v1/embeddings returned no embedding".to_string()),
+                }
+            }
+            Ok(r) => report.problems.push(format!("POST /v1/embeddings returned {}", r.status())),
+            Err(e) => report.problems.push(format!("POST /v1/embeddings failed: {}", e)),
+        }
+    }
+
+    // Never chat with a model that is not downloaded: Lemonade would start a multi-GB download.
+    if report.chat_model_present && report.chat_model_downloaded {
+        let body = serde_json::json!({
+            "model": chat_model,
+            "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
+            "max_tokens": 8,
+            "temperature": 0,
+        });
+        match client.post(format!("{}/v1/chat/completions", base)).json(&body).send().await {
+            Ok(r) if r.status().is_success() => {
+                let reply = r.json::<serde_json::Value>().await.ok().and_then(|j| {
+                    j.pointer("/choices/0/message/content").and_then(|c| c.as_str()).map(str::to_string)
+                });
+                match reply {
+                    Some(text) if !text.trim().is_empty() => report.chat_reply = Some(text),
+                    _ => report.problems.push("POST /v1/chat/completions returned no reply".to_string()),
+                }
+            }
+            Ok(r) => report.problems.push(format!("POST /v1/chat/completions returned {}", r.status())),
+            Err(e) => report.problems.push(format!("POST /v1/chat/completions failed: {}", e)),
+        }
+    }
+
+    report
 }
 
 #[cfg(test)]
