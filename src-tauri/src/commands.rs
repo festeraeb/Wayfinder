@@ -3700,7 +3700,8 @@ pub async fn chat_llama(prompt: String, model: Option<String>, endpoint: Option<
     let payload = serde_json::json!({
         "model": model_name,
         "messages": [
-            {"role": "system", "content": "You are a concise coding assistant. Answer briefly."},
+            // L-con contract (tone from the sarcasm slider). Chat only: embeddings never carry it.
+            {"role": "system", "content": crate::lcon::chat_system_prompt(crate::lcon::sarcasm())},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.3,

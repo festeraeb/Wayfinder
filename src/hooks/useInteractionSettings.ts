@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { InteractionAgentSettings } from "../types";
+import { tauriService } from "../services/tauri";
 
 const STORAGE_KEY = "wayfinder-interaction-settings";
 
@@ -27,6 +28,13 @@ export function useInteractionSettings() {
             // ignore corrupted state
         }
     }, []);
+
+    // The Rust side (L-con chat contract, Mr. Clippy's tone) keeps its own copy of the sarcasm level.
+    useEffect(() => {
+        tauriService.setInteractionSettings(settings.sarcasmLevel).catch(() => {
+            // not running inside Tauri (browser preview): nothing to sync
+        });
+    }, [settings.sarcasmLevel]);
 
     const persist = useCallback((next: InteractionAgentSettings) => {
         setSettings(next);

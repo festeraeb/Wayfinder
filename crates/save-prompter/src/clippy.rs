@@ -8,6 +8,26 @@ pub fn tone(level: u8) -> usize {
     (level as usize).min(2)
 }
 
+/// The sharpest tone the user allows, from the sarcasm slider (0 = kind .. 1 = spicy): below 1/3 Clippy
+/// stays gentle, below 2/3 dry at most, above that full sarcasm is allowed. Not a number = dry.
+pub fn tone_ceiling(sarcasm: f64) -> u8 {
+    if !sarcasm.is_finite() {
+        1
+    } else if sarcasm < 1.0 / 3.0 {
+        2
+    } else if sarcasm < 2.0 / 3.0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Level to pass to [`clippy_line`]: the folder's back-off level, softened up to the slider's ceiling.
+/// Good habits can only make Clippy kinder than the slider, never sharper.
+pub fn effective_level(backoff_level: u8, sarcasm: f64) -> u8 {
+    backoff_level.max(tone_ceiling(sarcasm))
+}
+
 const DUMPING_GROUND: [[&str; 3]; 3] = [
     [
         "Ah, Downloads. Where files go to be lost forever. Want to give this one a real home?",
@@ -109,6 +129,22 @@ mod tests {
         assert_eq!(clippy_line(&r, 1, 0), PLACEHOLDER[1][0]);
         assert_eq!(clippy_line(&r, 2, 0), PLACEHOLDER[2][0]);
         assert_eq!(clippy_line(&r, 9, 0), PLACEHOLDER[2][0], "levels above 2 stay gentle");
+    }
+
+    #[test]
+    fn sarcasm_slider_caps_the_tone() {
+        assert_eq!([0.0, 0.2, 0.33].map(tone_ceiling), [2, 2, 2]);
+        assert_eq!([0.34, 0.35, 0.66].map(tone_ceiling), [1, 1, 1]);
+        assert_eq!([0.67, 1.0].map(tone_ceiling), [0, 0]);
+        assert_eq!(tone_ceiling(f64::NAN), 1);
+        // Kind slider: even a brand-new folder (level 0) gets the gentle line.
+        let r = [HintReason::PlaceholderName];
+        assert_eq!(clippy_line(&r, effective_level(0, 0.1), 0), PLACEHOLDER[2][0]);
+        // Spicy slider: the back-off level still softens Clippy as habits improve.
+        assert_eq!(effective_level(0, 1.0), 0);
+        assert_eq!(effective_level(2, 1.0), 2);
+        // Default 0.35 is dry at most.
+        assert_eq!(effective_level(0, 0.35), 1);
     }
 
     #[test]

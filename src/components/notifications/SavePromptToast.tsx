@@ -1,8 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import { tauriService } from "../../services/tauri";
+import { useInteractionSettings } from "../../hooks/useInteractionSettings";
 import type { SavePrompt } from "../../types";
 
 const STRICTNESS_LABELS = ["Just trim", "Strip clutter", "Tidy names", "Tidy + date"];
+
+/** Same thirds as the Rust side (clippy::tone_ceiling). */
+const sarcasmLabel = (s: number) => (s < 1 / 3 ? "Kind" : s < 2 / 3 ? "Dry" : "Spicy");
 
 interface Props {
     /** Poll only while the file watcher is running. */
@@ -15,6 +19,7 @@ const SavePromptToast: React.FC<Props> = ({ active }) => {
     const [strictness, setStrictness] = useState(2);
     const [copied, setCopied] = useState<string | null>(null);
     const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+    const { settings, updateSettings } = useInteractionSettings();
 
     useEffect(() => {
         if (!active) return;
@@ -62,6 +67,11 @@ const SavePromptToast: React.FC<Props> = ({ active }) => {
                 Naming strictness: <strong>{STRICTNESS_LABELS[strictness]}</strong>
                 <input type="range" min={0} max={3} step={1} value={strictness}
                     onChange={(e) => changeStrictness(Number(e.target.value))} />
+            </label>
+            <label className="save-prompts__strictness" title="Mr. Clippy's tone, and the tone of the chat assistant">
+                Clippy's sarcasm: <strong>{sarcasmLabel(settings.sarcasmLevel)}</strong>
+                <input type="range" min={0} max={100} step={1} value={Math.round(settings.sarcasmLevel * 100)}
+                    onChange={(e) => updateSettings({ sarcasmLevel: Number(e.target.value) / 100 })} />
             </label>
             {prompts.map((p, i) => (
                 <div className="save-prompts__card" key={`${p.path}-${i}`}>
