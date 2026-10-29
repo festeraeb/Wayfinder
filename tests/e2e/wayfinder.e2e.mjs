@@ -5,7 +5,7 @@
 //   cdp    Windows (or any OS with WebView2/CDP): launch the Tauri exe with
 //          WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 and drive it with
 //          chromium.connectOverCDP. Needs WF_EXE.
-//   bridge Linux: run the real Rust command handlers behind wf-bridge (cargo build --features bridge --bin
+//   bridge Linux (and Windows when no desktop session is available): run the real Rust command handlers behind wf-bridge (cargo build --features bridge --bin
 //          wf-bridge) and drive the built front end in Chrome. The webview shell is the only part not under
 //          test. Needs WF_BRIDGE_BIN and WF_DIST.
 //
@@ -68,12 +68,17 @@ async function waitHttp(url, ms) {
 
 async function launch() {
   if (MODE === "cdp") {
-    const exe = process.env.WF_EXE;
-    assert(exe, "WF_EXE (path to the Tauri exe) is required in cdp mode");
-    proc = spawn(exe, [], {
-      env: { ...process.env, ...extraEnv, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}` },
-      stdio: "ignore", windowsHide: false,
-    });
+    // WF_ATTACH=1: the app was already started by hand in the interactive desktop session (needed when this
+    // script runs from an ssh session, where WebView2 cannot create a window). It must have been started with
+    // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<WF_CDP_PORT> and the WAYFINDER_LLM_* env.
+    if (!process.env.WF_ATTACH) {
+      const exe = process.env.WF_EXE;
+      assert(exe, "WF_EXE (path to the Tauri exe) is required in cdp mode");
+      proc = spawn(exe, [], {
+        env: { ...process.env, ...extraEnv, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}` },
+        stdio: "ignore", windowsHide: false,
+      });
+    }
     await waitHttp(`http://127.0.0.1:${CDP_PORT}/json/version`, 60000);
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
     const ctx = browser.contexts()[0];
@@ -86,7 +91,11 @@ async function launch() {
     proc = spawn(bin, [String(BRIDGE_PORT)], { env: { ...process.env, ...extraEnv, WF_DIST: dist }, stdio: "inherit" });
     baseUrl = `http://127.0.0.1:${BRIDGE_PORT}`;
     await waitHttp(baseUrl + "/", 30000);
-    browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || "/usr/bin/google-chrome", headless: true, args: ["--no-sandbox"] });
+    // Linux: system Chrome. Windows: WF_BROWSER_CHANNEL=msedge (the Chromium that WebView2 is built on).
+    const launchOpts = process.env.WF_BROWSER_CHANNEL
+      ? { channel: process.env.WF_BROWSER_CHANNEL, headless: true }
+      : { executablePath: process.env.CHROME_PATH || "/usr/bin/google-chrome", headless: true, args: ["--no-sandbox"] };
+    browser = await chromium.launch(launchOpts);
     page = await browser.newPage();
     // Tauri's invoke() goes through window.__TAURI_INTERNALS__; point it at the bridge.
     await page.addInitScript(() => {
