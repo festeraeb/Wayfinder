@@ -62,6 +62,29 @@ pub struct GitClippyReport {
     pub duplicates: Vec<DuplicateFile>,
     pub commit_suggestions: Vec<CommitSuggestion>,
     pub copy_pattern_files: Vec<FileSuggestion>,
+    /// Save-prompter commit nudge: "none", "gentle", "firm" or "loud".
+    #[serde(default)]
+    pub commit_nudge: String,
+}
+
+/// Commit nudge level from the save-prompter crate: minutes since the last commit and the pile of
+/// uncommitted files decide how loudly to nag; `strictness` is the user's save-prompter strictness.
+pub fn commit_nudge_name(repo_path: &str, strictness: u8, uncommitted_files: usize) -> String {
+    use wayfinder_save_prompter::pulse::{commit_nudge, Nudge, RepoPulse};
+    let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+    let last_commit_ms = run_git_command(repo_path, &["log", "-1", "--format=%ct"])
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|secs| secs * 1000);
+    let files = uncommitted_files.min(u32::MAX as usize) as u32;
+    let pulse = RepoPulse { now_ms, last_commit_ms, saves_since_commit: files, uncommitted_files: files };
+    match commit_nudge(&pulse, strictness) {
+        Nudge::None => "none",
+        Nudge::Gentle => "gentle",
+        Nudge::Firm => "firm",
+        Nudge::Loud => "loud",
+    }
+    .to_string()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -785,6 +808,9 @@ pub fn generate_clippy_report(
         _ => "📎 All clear! You're doing great. ✨".to_string(),
     };
 
+    let strictness = crate::save_prompter_bridge::SAVE_STATE.lock().map(|st| st.strictness).unwrap_or(2);
+    let commit_nudge = commit_nudge_name(repo_path, strictness, status.uncommitted_files);
+
     Ok(GitClippyReport {
         status,
         urgency_level: urgency_level.to_string(),
@@ -793,6 +819,7 @@ pub fn generate_clippy_report(
         duplicates,
         commit_suggestions,
         copy_pattern_files,
+        commit_nudge,
     })
 }
 
@@ -872,5 +899,41 @@ pub fn execute_git_action(
             Ok(format!("📎 Marked as completed with tag '{}'.", tag))
         }
         _ => Err(format!("Unknown action: {}", action)),
+    }
+}
+
+#[cfg(test)]
+mod commit_nudge_tests {
+    use super::*;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let ok = std::process::Command::new("git").current_dir(dir).args(args).status().unwrap().success();
+        assert!(ok, "git {:?}", args);
+    }
+
+    #[test]
+    fn old_commit_with_piled_up_files_nudges_loudly_and_report_carries_it() {
+        let dir = std::env::temp_dir().join(format!("wf-nudge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        git(&dir, &["add", "."]);
+        let out = std::process::Command::new("git")
+            .current_dir(&dir)
+            .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "old", "--date", "2020-01-01T00:00:00Z"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        for i in 0..25 {
+            std::fs::write(dir.join(format!("n{i}.txt")), "x").unwrap();
+        }
+        let p = dir.to_string_lossy().to_string();
+        assert_eq!(commit_nudge_name(&p, 2, 25), "loud");
+        assert_eq!(commit_nudge_name(&p, 2, 0), "none");
+        let report = generate_clippy_report(&p, None).unwrap();
+        assert_eq!(report.commit_nudge, "loud");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -32,7 +32,15 @@ notify = "8.2.0"
 regex = "1.12.3"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
+[[bin]]
+name = "wf-bridge"
+path = "src/bin/wf_bridge.rs"
+required-features = ["bridge"]
+
 [features]
+# Test bridge: serves the built front end and forwards invoke() calls to the real command handlers
+# over HTTP, so Playwright can drive the UI on machines without a webview driver. Never shipped.
+bridge = ["tauri/test"]
 # this feature is used for production builds or when `devPath` points to the filesystem
 # DO NOT REMOVE!!
 custom-protocol = ["tauri/custom-protocol"]

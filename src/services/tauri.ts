@@ -52,18 +52,24 @@ export const tauriService = {
         return invoke("get_scoped_clusters", { indexDir });
     },
 
+    /// Hybrid semantic + keyword search. `mode` is "keyword" (with a `note` saying why) when the
+    /// query could not be embedded, so the UI never claims a semantic answer it did not compute.
+    async semanticSearch(
+        query: string,
+        indexDir: string,
+        topK: number = 10,
+        semanticWeight: number = 0.7
+    ): Promise<{ mode: "semantic" | "keyword"; note: string | null; results: Types.SearchResult[] }> {
+        return invoke("semantic_search", { query, indexDir, topK, semanticWeight });
+    },
+
     async search(
         query: string,
         indexDir: string,
         topK: number = 10,
         semanticWeight: number = 0.7
     ): Promise<Types.SearchResult[]> {
-        return invoke("search", {
-            query,
-            indexDir,
-            topK,
-            semanticWeight,
-        });
+        return (await this.semanticSearch(query, indexDir, topK, semanticWeight)).results;
     },
 
     async getClustersSummary(indexDir: string): Promise<Types.ClustersSummary> {
@@ -208,6 +214,10 @@ export const tauriService = {
 
     async chatLlama(prompt: string, model?: string, endpoint?: string): Promise<{ text: string }> {
         return invoke("chat_llama", { prompt, model, endpoint });
+    },
+
+    async checkLemonadeSetup(base?: string, chatModel?: string, embedModel?: string): Promise<Types.LemonadeSetupReport> {
+        return invoke("check_lemonade_setup", { base, chatModel, embedModel });
     },
 
     async executeClippyAction(repoPath: string, action: string, data?: any): Promise<{ success: boolean; output: string }> {
