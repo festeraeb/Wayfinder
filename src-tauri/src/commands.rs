@@ -760,6 +760,8 @@ pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usiz
     let client = reqwest::Client::new();
     let base = endpoint.unwrap_or_else(|| "http://localhost:5002".to_string());
     let url = format!("{}/v1/embeddings", base.trim_end_matches('/'));
+    // A key-gated Lemonade (e.g. cesarops.com/lemonade) needs the configured key here too, not just in chat.
+    let auth = crate::llm_config::auth_for_base(&base, &resolved_chat_target());
     let model = model_name.unwrap_or_else(|| "embeddinggemma-300m-f16".to_string());
 
     let chunk_size = batch_size.unwrap_or(64).max(1);
@@ -818,7 +820,11 @@ pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usiz
                     "model": model,
                     "input": truncated,
                 });
-                match client.post(&url).json(&payload).send().await {
+                let mut request = client.post(&url).json(&payload);
+                if let Some(header) = &auth {
+                    request = request.header("Authorization", header);
+                }
+                match request.send().await {
                     Ok(resp) if !resp.status().is_success() => {
                         let status = resp.status();
                         let err_text = resp.text().await.unwrap_or_default();
@@ -3655,7 +3661,7 @@ pub async fn delete_duplicate_files(file_paths: Vec<String>) -> Result<serde_jso
 /// (`APPDATA` on Windows, `$HOME/.config/wayfinder` elsewhere) and fall back
 /// to the legacy `$HOME/.wayfinder` location. Returns `None` when no candidate
 /// exists, which the caller treats as "no config file".
-fn lemonade_config_path() -> Option<PathBuf> {
+pub(crate) fn lemonade_config_path() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Ok(appdata) = std::env::var("APPDATA") {
@@ -3674,6 +3680,12 @@ fn lemonade_config_path() -> Option<PathBuf> {
     }
 
     candidates.into_iter().find(|p| p.exists())
+}
+
+/// The chat target from env vars and `lemonade_config.json` (the same resolution chat uses).
+pub(crate) fn resolved_chat_target() -> crate::llm_config::LlmTarget {
+    let config_text = lemonade_config_path().and_then(|p| fs::read_to_string(p).ok());
+    crate::llm_config::resolve_chat_target(&|k| std::env::var(k).ok(), config_text.as_deref())
 }
 
 /// Resolve the URL, model and auth header for a chat request.

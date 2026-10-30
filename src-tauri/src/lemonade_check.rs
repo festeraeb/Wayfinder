@@ -67,7 +67,17 @@ fn find_model(data: &[serde_json::Value], name: &str) -> (bool, bool, Option<Str
 /// Run the check. Never panics and never returns Err: failures go into
 /// `problems`.
 pub async fn check_lemonade(base: &str, chat_model: &str, embed_model: &str) -> LemonadeReport {
+    check_lemonade_with_auth(base, chat_model, embed_model, None).await
+}
+
+/// [`check_lemonade`] against a key-gated Lemonade: `auth` is the Authorization header value sent on
+/// every request (models, embeddings, chat).
+pub async fn check_lemonade_with_auth(base: &str, chat_model: &str, embed_model: &str, auth: Option<&str>) -> LemonadeReport {
     let base = normalise_base(base);
+    let with_auth = |r: reqwest::RequestBuilder| match auth {
+        Some(h) => r.header("Authorization", h),
+        None => r,
+    };
     let client = reqwest::Client::new();
     let mut report = LemonadeReport {
         models_ok: false,
@@ -81,7 +91,7 @@ pub async fn check_lemonade(base: &str, chat_model: &str, embed_model: &str) -> 
         problems: Vec::new(),
     };
 
-    let resp = match client.get(format!("{}/v1/models", base)).send().await {
+    let resp = match with_auth(client.get(format!("{}/v1/models", base))).send().await {
         Ok(r) => r,
         Err(e) => {
             report.problems.push(format!("Lemonade not reachable at {}: {}", base, e));
@@ -128,7 +138,7 @@ pub async fn check_lemonade(base: &str, chat_model: &str, embed_model: &str) -> 
 
     if report.embed_model_present && report.embed_model_downloaded {
         let body = serde_json::json!({"model": embed_model, "input": "Wayfinder setup check"});
-        match client.post(format!("{}/v1/embeddings", base)).json(&body).send().await {
+        match with_auth(client.post(format!("{}/v1/embeddings", base))).json(&body).send().await {
             Ok(r) if r.status().is_success() => {
                 let dim = r.json::<serde_json::Value>().await.ok().and_then(|j| {
                     j.pointer("/data/0/embedding").and_then(|e| e.as_array()).map(|e| e.len())
@@ -151,7 +161,7 @@ pub async fn check_lemonade(base: &str, chat_model: &str, embed_model: &str) -> 
             "max_tokens": 8,
             "temperature": 0,
         });
-        match client.post(format!("{}/v1/chat/completions", base)).json(&body).send().await {
+        match with_auth(client.post(format!("{}/v1/chat/completions", base))).json(&body).send().await {
             Ok(r) if r.status().is_success() => {
                 let reply = r.json::<serde_json::Value>().await.ok().and_then(|j| {
                     j.pointer("/choices/0/message/content").and_then(|c| c.as_str()).map(str::to_string)
@@ -347,5 +357,22 @@ mod tests {
         assert_eq!(report.chat_reply.as_deref(), Some("ok"));
         assert!(!report.all_ok());
         assert!(report.problems.iter().any(|p| p.contains("500")), "{:?}", report.problems);
+    }
+
+    #[tokio::test]
+    async fn lemonade_check_sends_the_key_on_every_request() {
+        let (base, log) = server(models_body(Some(true), true));
+        let report = check_lemonade_with_auth(&format!("{}/api", base), CHAT, EMBED, Some("Bearer k-123")).await;
+        assert!(report.all_ok(), "{:?}", report);
+        let reqs = mock_http::requests(&log);
+        assert_eq!(reqs.len(), 3, "{:?}", reqs);
+        assert!(reqs.iter().all(|r| r.authorization.as_deref() == Some("Bearer k-123")), "{:?}", reqs);
+    }
+
+    #[tokio::test]
+    async fn lemonade_check_without_a_key_sends_none() {
+        let (base, log) = server(models_body(Some(true), true));
+        check_lemonade(&format!("{}/api", base), CHAT, EMBED).await;
+        assert!(mock_http::requests(&log).iter().all(|r| r.authorization.is_none()));
     }
 }

@@ -87,6 +87,16 @@ pub fn auth_header(t: &LlmTarget) -> Option<String> {
     t.api_key.as_ref().map(|key| format!("Bearer {}", key))
 }
 
+/// Authorization header for a request to `base`: the target's key, but only when `base` is the
+/// target's own server (the key belongs to that server; never send it anywhere else).
+pub fn auth_for_base(base: &str, t: &LlmTarget) -> Option<String> {
+    if normalize_base(base) == t.base {
+        auth_header(t)
+    } else {
+        None
+    }
+}
+
 /// Apply one env var to `slot`, ignoring values that are empty after trim.
 fn env_override(env: &dyn Fn(&str) -> Option<String>, name: &str, slot: &mut Option<String>) {
     if let Some(value) = env(name) {
@@ -301,5 +311,15 @@ mod tests {
             api_key: None,
         };
         assert!(format!("{:?}", no_key).contains("api_key: None"));
+    }
+
+    #[test]
+    fn auth_for_base_only_for_the_configured_server() {
+        let t = LlmTarget { base: "https://cesarops.com/lemonade".into(), model: "m".into(), api_key: Some("k".into()) };
+        assert_eq!(auth_for_base("https://cesarops.com/lemonade/v1/", &t), Some("Bearer k".to_string()));
+        assert_eq!(auth_for_base("https://cesarops.com/lemonade", &t), Some("Bearer k".to_string()));
+        assert_eq!(auth_for_base("http://127.0.0.1:13305/api", &t), None);
+        let no_key = LlmTarget { api_key: None, ..t };
+        assert_eq!(auth_for_base("https://cesarops.com/lemonade", &no_key), None);
     }
 }

@@ -13,6 +13,8 @@ pub struct Recorded {
     pub method: String,
     pub path: String,
     pub body: String,
+    /// The Authorization header, when the client sent one.
+    pub authorization: Option<String>,
 }
 
 pub type Handler = Arc<dyn Fn(&str, &str, &str) -> (u16, String) + Send + Sync>;
@@ -43,6 +45,7 @@ pub fn start(handler: Handler) -> (String, Log) {
             let method = parts.next().unwrap_or("").to_string();
             let path = parts.next().unwrap_or("").to_string();
             let mut content_length = 0usize;
+            let mut authorization = None;
             loop {
                 let mut line = String::new();
                 if reader.read_line(&mut line).unwrap_or(0) == 0 {
@@ -55,6 +58,8 @@ pub fn start(handler: Handler) -> (String, Log) {
                 if let Some((name, value)) = trimmed.split_once(':') {
                     if name.trim().eq_ignore_ascii_case("content-length") {
                         content_length = value.trim().parse().unwrap_or(0);
+                    } else if name.trim().eq_ignore_ascii_case("authorization") {
+                        authorization = Some(value.trim().to_string());
                     }
                 }
             }
@@ -67,7 +72,7 @@ pub fn start(handler: Handler) -> (String, Log) {
             log_in_thread
                 .lock()
                 .unwrap()
-                .push(Recorded { method, path, body });
+                .push(Recorded { method, path, body, authorization });
             let response = format!(
                 "HTTP/1.1 {} MOCK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 status,

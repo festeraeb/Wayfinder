@@ -49,9 +49,13 @@ fn server_of(index_dir: &Path, embeddings_model: &str) -> Option<(String, String
 async fn embed_query(base: &str, model: &str, query: &str) -> Result<Vec<f32>, String> {
     let base = base.trim().trim_end_matches('/');
     let base = base.strip_suffix("/v1").unwrap_or(base);
-    let resp = reqwest::Client::new()
+    let mut request = reqwest::Client::new()
         .post(format!("{}/v1/embeddings", base))
-        .json(&serde_json::json!({"model": model, "input": query}))
+        .json(&serde_json::json!({"model": model, "input": query}));
+    if let Some(header) = crate::llm_config::auth_for_base(base, &commands::resolved_chat_target()) {
+        request = request.header("Authorization", header);
+    }
+    let resp = request
         .send()
         .await
         .map_err(|e| format!("embedding request failed: {e}"))?;

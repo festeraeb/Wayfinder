@@ -1,6 +1,6 @@
 //! Tauri command wrapping the Lemonade setup check for the UI.
 
-use crate::lemonade_check::check_lemonade;
+use crate::lemonade_check::check_lemonade_with_auth;
 
 /// Embedding model the app asks Lemonade for when nothing else is chosen (same as the embeddings default).
 const DEFAULT_EMBED_MODEL: &str = "nomic-embed-text-v1-GGUF";
@@ -10,20 +10,22 @@ fn non_blank(v: Option<String>) -> Option<String> {
 }
 
 /// Run the Lemonade setup check. Blank arguments fall back to the chat target resolved from the
-/// WAYFINDER_LLM_* environment (Lemonade on 127.0.0.1:13305 and the default chat model if unset).
+/// WAYFINDER_LLM_* environment and lemonade_config.json (Lemonade on 127.0.0.1:13305 and the default
+/// chat model if unset). The configured API key is sent when the check targets the configured server.
 #[tauri::command]
 pub async fn check_lemonade_setup(
     base: Option<String>,
     chat_model: Option<String>,
     embed_model: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let target = crate::llm_config::resolve_chat_target(&|k| std::env::var(k).ok(), None);
-    let base = non_blank(base).unwrap_or(target.base);
-    let chat_model = non_blank(chat_model).unwrap_or(target.model);
+    let target = crate::commands::resolved_chat_target();
+    let base = non_blank(base).unwrap_or_else(|| target.base.clone());
+    let chat_model = non_blank(chat_model).unwrap_or_else(|| target.model.clone());
     let embed_model = non_blank(embed_model)
         .or_else(|| non_blank(std::env::var("WAYFINDER_EMBED_MODEL").ok()))
         .unwrap_or_else(|| DEFAULT_EMBED_MODEL.to_string());
-    let r = check_lemonade(&base, &chat_model, &embed_model).await;
+    let auth = crate::llm_config::auth_for_base(&base, &target);
+    let r = check_lemonade_with_auth(&base, &chat_model, &embed_model, auth.as_deref()).await;
     Ok(serde_json::json!({
         "all_ok": r.all_ok(),
         "base": base,
