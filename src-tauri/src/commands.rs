@@ -280,6 +280,11 @@ impl Default for EmbeddingJobConfig {
     }
 }
 
+// Default endpoint for the local Lemonade server (AMD), which serves OpenAI-style embeddings.
+const LEMONADE_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:13305/api";
+// Default embedding model served by Lemonade.
+const LEMONADE_DEFAULT_EMBED_MODEL: &str = "nomic-embed-text-v1-GGUF";
+
 fn default_local_model_name() -> String {
     "embeddinggemma-300m-f16".to_string()
 }
@@ -312,10 +317,11 @@ fn resolve_provider_config(index_path: &Path) -> ProviderConfig {
         return config;
     }
 
+    // No provider_config.json yet: default to the local Lemonade server.
     ProviderConfig {
         provider: EmbeddingProvider::Llama,
-        local_model: Some(default_local_model_name()),
-        local_endpoint: Some("http://localhost:5002".to_string()),
+        local_model: Some(LEMONADE_DEFAULT_EMBED_MODEL.to_string()),
+        local_endpoint: Some(LEMONADE_DEFAULT_ENDPOINT.to_string()),
     }
 }
 
@@ -711,6 +717,18 @@ pub async fn generate_embeddings_local(_index_dir: String, _max_files: Option<us
     }))
 }
 
+/// Longest prefix of `s` that fits in `max_bytes` and ends on a char boundary.
+pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Generate embeddings via local llama.cpp HTTP server
 pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usize>, batch_size: Option<usize>, endpoint: Option<String>, model_name: Option<String>) -> Result<serde_json::Value, String> {
     let index_path = Path::new(&index_dir);
@@ -742,6 +760,8 @@ pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usiz
     let client = reqwest::Client::new();
     let base = endpoint.unwrap_or_else(|| "http://localhost:5002".to_string());
     let url = format!("{}/v1/embeddings", base.trim_end_matches('/'));
+    // A key-gated Lemonade (e.g. cesarops.com/lemonade) needs the configured key here too, not just in chat.
+    let auth = crate::llm_config::auth_for_base(&base, &resolved_chat_target());
     let model = model_name.unwrap_or_else(|| "embeddinggemma-300m-f16".to_string());
 
     let chunk_size = batch_size.unwrap_or(64).max(1);
@@ -790,22 +810,40 @@ pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usiz
                 Ok(c) => c,
                 Err(_) => { skipped_count += 1; continue; }
             };
-            let truncated = if content.len() > 8000 { &content[..8000] } else { content };
+            let mut truncated = truncate_utf8(content, 8000);
 
-            let payload = serde_json::json!({
-                "model": model,
-                "input": truncated,
-            });
-
-            match client.post(&url).json(&payload).send().await {
-                Ok(resp) => {
-                    let status = resp.status();
-                    if !status.is_success() {
+            // Stock Lemonade rejects inputs over its physical batch (512 tokens) with
+            // "too large to process": retry the same file with half the text, up to 4 times.
+            let mut retries = 0;
+            let sent = loop {
+                let payload = serde_json::json!({
+                    "model": model,
+                    "input": truncated,
+                });
+                let mut request = client.post(&url).json(&payload);
+                if let Some(header) = &auth {
+                    request = request.header("Authorization", header);
+                }
+                match request.send().await {
+                    Ok(resp) if !resp.status().is_success() => {
+                        let status = resp.status();
                         let err_text = resp.text().await.unwrap_or_default();
+                        if err_text.contains("too large to process") && retries < 4 {
+                            retries += 1;
+                            truncated = truncate_utf8(truncated, truncated.len() / 2);
+                            continue;
+                        }
                         error_count += 1;
                         log_error(index_path, "llama_api_error", Some(&file.path), &err_text, Some(&status.as_u16().to_string()));
-                        continue;
+                        break None;
                     }
+                    other => break Some(other),
+                }
+            };
+            let Some(sent) = sent else { continue };
+
+            match sent {
+                Ok(resp) => {
                     match resp.json::<serde_json::Value>().await {
                         Ok(json) => {
                             if let Some(arr) = json.get("data").and_then(|d| d.get(0)).and_then(|d| d.get("embedding")) {
@@ -1300,7 +1338,7 @@ pub async fn generate_embeddings_gcp(index_dir: String, max_files: Option<usize>
             }
 
             // Trim to avoid context issues
-            let truncated_content = if content.len() > 8000 { content[..8000].to_string() } else { content.clone() };
+            let truncated_content = truncate_utf8(&content, 8000).to_string();
 
             let content_hash = format!("{:x}", md5_hash(&truncated_content));
 
@@ -1600,6 +1638,281 @@ pub async fn create_clusters(index_dir: String, num_clusters: Option<usize>) -> 
         "total_files": embeddings_data.embeddings.len(),
         "message": format!("Created {} clusters from {} files", clusters.len(), embeddings_data.embeddings.len())
     }))
+}
+
+/// Parent folder of a path, normalised to forward slashes.
+///
+/// A Windows drive root ("C:/file.txt") yields "C:/" rather than "C:", so the
+/// root scope has the same shape as the POSIX root "/" and the UI does not show
+/// one drive as a bare drive letter.
+fn scope_of_path(path: &str) -> String {
+    let p = path.replace('\\', "/");
+    let scope = match p.rfind('/') {
+        Some(0) => "/".to_string(),
+        Some(i) => p[..i].to_string(),
+        None => ".".to_string(),
+    };
+    // Bare drive letter, e.g. "C:" from "C:/file.txt".
+    let bytes = scope.as_bytes();
+    if bytes.len() == 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return format!("{}/", scope);
+    }
+    scope
+}
+
+/// Mean vector of a slice of embeddings. `None` for an empty slice so callers
+/// can tell "no centroid" from a genuine zero vector.
+///
+/// Vectors whose dimensionality disagrees with the first one are excluded, so
+/// the divisor counts only what was actually accumulated -- otherwise a single
+/// odd-dimension vector would silently scale the whole centroid down.
+fn centroid_of(embeddings: &[&FileEmbedding]) -> Option<Vec<f32>> {
+    let first = embeddings.first()?;
+    let dim = first.embedding.len();
+    if dim == 0 {
+        return None;
+    }
+    let mut acc = vec![0f32; dim];
+    let mut n = 0usize;
+    for emb in embeddings {
+        // Mismatched dimensions would silently produce garbage; skip rather
+        // than panic inside a command handler.
+        if emb.embedding.len() != dim {
+            continue;
+        }
+        for (i, v) in emb.embedding.iter().enumerate() {
+            acc[i] += v;
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return None;
+    }
+    let n = n as f32;
+    Some(acc.into_iter().map(|v| v / n).collect())
+}
+
+/// Hierarchical (scoped) clustering over an index.
+///
+/// Per-folder clusters stay the source of truth; the drive-level view is
+/// computed from one centroid per folder rather than by re-clustering every
+/// member vector. That keeps the drive-wide overview proportional to the
+/// number of folders instead of the number of files, so editing one folder
+/// does not force a whole-drive re-cluster.
+#[derive(Serialize, Debug)]
+pub struct ScopedClustering {
+    /// folder path -> its own clusters (each with its own centroid)
+    pub scopes: HashMap<String, Vec<Cluster>>,
+    /// drive-level clusters over per-scope centroids (file_paths are scope names)
+    pub drive: Vec<Cluster>,
+    /// folder path -> drive cluster id
+    pub scope_to_drive: HashMap<String, usize>,
+    pub scope_count: usize,
+    pub total_files: usize,
+}
+
+/// Build a pseudo-embedding list from per-scope centroids so the existing
+/// k-means implementation can cluster the rollup without a second algorithm.
+fn centroids_as_embeddings(map: &HashMap<String, Vec<f32>>) -> Vec<FileEmbedding> {
+    map.iter()
+        .map(|(scope, c)| FileEmbedding {
+            path: scope.clone(),
+            embedding: c.clone(),
+            content_hash: String::new(),
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub async fn create_scoped_clusters(
+    index_dir: String,
+    min_per_scope: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    println!("[RUST] create_scoped_clusters called for: {}", index_dir);
+
+    let index_path = Path::new(&index_dir);
+    let embeddings_file = index_path.join("embeddings.json");
+    let clusters_file = index_path.join("scoped_clusters.json");
+
+    if !embeddings_file.exists() {
+        return Err("No embeddings file found. Please generate embeddings first.".to_string());
+    }
+
+    let content = fs::read_to_string(&embeddings_file)
+        .map_err(|e| format!("Failed to read embeddings: {}", e))?;
+    let embeddings_data: EmbeddingsData = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse embeddings: {}", e))?;
+
+    if embeddings_data.embeddings.is_empty() {
+        return Err("No embeddings found. Please generate embeddings first.".to_string());
+    }
+
+    let min_per_scope = min_per_scope.unwrap_or(2).max(2);
+
+    // Group indices by scope, preserving first-seen order for determinism.
+    let mut order: Vec<String> = Vec::new();
+    let mut by_scope: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, emb) in embeddings_data.embeddings.iter().enumerate() {
+        let scope = scope_of_path(&emb.path);
+        if !by_scope.contains_key(&scope) {
+            order.push(scope.clone());
+        }
+        by_scope.entry(scope).or_default().push(i);
+    }
+
+    let mut scopes: HashMap<String, Vec<Cluster>> = HashMap::new();
+    let mut scope_centroids: HashMap<String, Vec<f32>> = HashMap::new();
+
+    for scope in &order {
+        let indices = &by_scope[scope];
+        let scoped: Vec<FileEmbedding> = indices
+            .iter()
+            .map(|i| embeddings_data.embeddings[*i].clone())
+            .collect();
+        let refs: Vec<&FileEmbedding> = scoped.iter().collect();
+
+        if scoped.len() < min_per_scope {
+            // Too small to split meaningfully; keep the folder whole rather
+            // than dropping it from the picture.
+            scopes.insert(
+                scope.clone(),
+                vec![Cluster {
+                    id: 0,
+                    centroid: centroid_of(&refs).unwrap_or_default(),
+                    file_paths: scoped.iter().map(|e| e.path.clone()).collect(),
+                    label: None,
+                }],
+            );
+        } else {
+            // sqrt-of-count keeps small folders from shattering into noise.
+            let k = ((scoped.len() as f64).sqrt() as usize).clamp(2, 20);
+            scopes.insert(scope.clone(), kmeans_cluster(&scoped, k));
+        }
+
+        if let Some(c) = centroid_of(&refs) {
+            scope_centroids.insert(scope.clone(), c);
+        }
+    }
+
+    // Drive rollup: cluster the per-scope CENTROIDS, not every member vector.
+    // This is the whole point -- cost scales with folders, not files.
+    let drive: Vec<Cluster> = match scope_centroids.len() {
+        0 => Vec::new(),
+        1 => {
+            let (scope, c) = scope_centroids.iter().next().unwrap();
+            vec![Cluster {
+                id: 0,
+                centroid: c.clone(),
+                file_paths: vec![scope.clone()],
+                label: None,
+            }]
+        }
+        n => {
+            let pseudo = centroids_as_embeddings(&scope_centroids);
+            let k = ((n as f64).sqrt() as usize).clamp(2, 20);
+            kmeans_cluster(&pseudo, k)
+        }
+    };
+
+    // Map each scope to the drive cluster it landed in.
+    let mut scope_to_drive: HashMap<String, usize> = HashMap::new();
+    for cluster in &drive {
+        for scope in &cluster.file_paths {
+            scope_to_drive.insert(scope.clone(), cluster.id);
+        }
+    }
+
+    let result = ScopedClustering {
+        scope_count: scopes.len(),
+        total_files: embeddings_data.embeddings.len(),
+        scopes,
+        drive: drive.clone(),
+        scope_to_drive,
+    };
+
+    let json = serde_json::to_string_pretty(&result)
+        .map_err(|e| format!("Failed to serialize clusters: {}", e))?;
+    fs::write(&clusters_file, json)
+        .map_err(|e| format!("Failed to write scoped clusters file: {}", e))?;
+
+    println!(
+        "[RUST] Scoped clustering complete: {} scopes -> {} drive clusters",
+        result.scope_count,
+        drive.len()
+    );
+
+    Ok(serde_json::json!({
+        "clusters_created": drive.len(),
+        "scope_count": result.scope_count,
+        "total_files": result.total_files,
+        "message": format!(
+            "Created {} drive clusters from {} folders ({} files)",
+            drive.len(), result.scope_count, result.total_files
+        )
+    }))
+}
+
+/// Read back a previously written `scoped_clusters.json` for the frontend.
+///
+/// Returns an empty-but-valid shape when nothing has been generated yet, so
+/// the UI can render an empty state instead of treating "not run yet" as an
+/// error (mirrors get_clusters_summary).
+#[tauri::command]
+pub async fn get_scoped_clusters(index_dir: String) -> Result<serde_json::Value, String> {
+    let index_path = Path::new(&index_dir);
+    let scoped_file = index_path.join("scoped_clusters.json");
+
+    if !scoped_file.exists() {
+        return Ok(serde_json::json!({
+            "scopes": {},
+            "drive": [],
+            "scope_to_drive": {},
+            "scope_count": 0,
+            "total_files": 0,
+            "message": "No scoped clusters found. Run 'Create Scoped Clusters' first."
+        }));
+    }
+
+    let content = fs::read_to_string(&scoped_file)
+        .map_err(|e| format!("Failed to read scoped clusters file: {}", e))?;
+    let mut parsed: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse scoped clusters: {}", e))?;
+
+    // Reshape for display: give the frontend {name, path} pairs like the flat
+    // summary does, so ClusterPanel can reuse its file-list renderer.
+    if let Some(drive) = parsed.get("drive").and_then(|d| d.as_array()) {
+        let shaped: Vec<serde_json::Value> = drive
+            .iter()
+            .map(|c| {
+                let files: Vec<serde_json::Value> = c
+                    .get("file_paths")
+                    .and_then(|f| f.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|p| {
+                                let s = p.as_str().unwrap_or("");
+                                serde_json::json!({
+                                    "name": Path::new(s)
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| s.to_string()),
+                                    "path": s
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "id": c.get("id").cloned().unwrap_or(serde_json::json!(0)),
+                    "files": files,
+                    "file_count": files.len(),
+                })
+            })
+            .collect();
+        parsed["drive_display"] = serde_json::Value::Array(shaped);
+    }
+
+    Ok(parsed)
 }
 
 /// K-means clustering implementation
@@ -2597,17 +2910,29 @@ pub async fn save_provider_config(
         return Err(format!("Index path not found: {}", index_dir));
     }
 
-    let provider_enum = match provider.to_lowercase().as_str() {
+    let provider_key = provider.to_lowercase();
+    // "lemonade" is an alias for the Llama provider (same OpenAI-style API),
+    // but with Lemonade's own default endpoint/model.
+    let is_lemonade = provider_key == "lemonade";
+
+    let provider_enum = match provider_key.as_str() {
         "local" => EmbeddingProvider::Local,
-        "llama" | "local_llama" | "local_gpu" => EmbeddingProvider::Llama,
+        "llama" | "local_llama" | "local_gpu" | "lemonade" => EmbeddingProvider::Llama,
         "azure" => EmbeddingProvider::Azure,
         "gcp" => EmbeddingProvider::Gcp,
-        _ => return Err("Unknown provider. Use 'local', 'llama', 'azure', or 'gcp'.".to_string()),
+        _ => return Err("Unknown provider. Use 'local', 'llama', 'lemonade', 'azure', or 'gcp'.".to_string()),
     };
 
     let model = match provider_enum {
         EmbeddingProvider::Local => Some(local_model.unwrap_or_else(default_local_model_name)),
-        EmbeddingProvider::Llama => local_model.or_else(|| Some("embeddinggemma-300m-f16".to_string())),
+        EmbeddingProvider::Llama => {
+            if is_lemonade {
+                let trimmed = local_model.unwrap_or_default().trim().to_string();
+                if trimmed.is_empty() { Some(LEMONADE_DEFAULT_EMBED_MODEL.to_string()) } else { Some(trimmed) }
+            } else {
+                local_model.or_else(|| Some("embeddinggemma-300m-f16".to_string()))
+            }
+        },
         EmbeddingProvider::Azure => local_model.clone(),
         EmbeddingProvider::Gcp => local_model,
     };
@@ -2615,7 +2940,9 @@ pub async fn save_provider_config(
     let endpoint = match provider_enum {
         EmbeddingProvider::Llama => {
             let trimmed = local_endpoint.unwrap_or_default().trim().to_string();
-            if trimmed.is_empty() { Some("http://localhost:5002".to_string()) } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                if is_lemonade { Some(LEMONADE_DEFAULT_ENDPOINT.to_string()) } else { Some("http://localhost:5002".to_string()) }
+            } else { Some(trimmed) }
         },
         _ => local_endpoint,
     };
@@ -3327,25 +3654,104 @@ pub async fn delete_duplicate_files(file_paths: Vec<String>) -> Result<serde_jso
     }))
 }
 
+/// Locate `lemonade_config.json` in the global config directory.
+///
+/// `crate::vertex_ai::get_global_config_dir` is private, so this mirrors its
+/// intent without touching that module: prefer the platform config dir
+/// (`APPDATA` on Windows, `$HOME/.config/wayfinder` elsewhere) and fall back
+/// to the legacy `$HOME/.wayfinder` location. Returns `None` when no candidate
+/// exists, which the caller treats as "no config file".
+pub(crate) fn lemonade_config_path() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let appdata = appdata.trim();
+        if !appdata.is_empty() {
+            candidates.push(Path::new(appdata).join("wayfinder").join("lemonade_config.json"));
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        let home = home.trim();
+        if !home.is_empty() {
+            candidates.push(Path::new(home).join(".config").join("wayfinder").join("lemonade_config.json"));
+            candidates.push(Path::new(home).join(".wayfinder").join("lemonade_config.json"));
+        }
+    }
+
+    candidates.into_iter().find(|p| p.exists())
+}
+
+/// The chat target from env vars and `lemonade_config.json` (the same resolution chat uses).
+pub(crate) fn resolved_chat_target() -> crate::llm_config::LlmTarget {
+    let config_text = lemonade_config_path().and_then(|p| fs::read_to_string(p).ok());
+    crate::llm_config::resolve_chat_target(&|k| std::env::var(k).ok(), config_text.as_deref())
+}
+
+/// Resolve the URL, model and auth header for a chat request.
+///
+/// An explicitly passed `endpoint` or `model` always wins over `target`; only
+/// the missing pieces fall back to the resolved target. The target case uses
+/// `llm_config::chat_url`, while an explicit endpoint is normalised so a
+/// trailing `/v1` is not doubled.
+pub(crate) fn chat_request_parts(
+    endpoint: Option<String>,
+    model: Option<String>,
+    target: &crate::llm_config::LlmTarget,
+) -> (String, String, Option<String>) {
+    let url = match endpoint {
+        Some(raw) => {
+            let base = raw.trim().trim_end_matches('/');
+            // The caller may already include the "/v1" suffix; drop it so we
+            // never build ".../v1/v1/chat/completions".
+            let base = base.strip_suffix("/v1").unwrap_or(base);
+            format!("{}/v1/chat/completions", base.trim_end_matches('/'))
+        }
+        None => crate::llm_config::chat_url(target),
+    };
+
+    let model = model.unwrap_or_else(|| target.model.clone());
+    // The configured key belongs to the configured server: only send it when the request goes there.
+    let auth = if url == crate::llm_config::chat_url(target) {
+        crate::llm_config::auth_header(target)
+    } else {
+        None
+    };
+
+    (url, model, auth)
+}
+
 /// Lightweight local chat via llama.cpp server (OpenAI-compatible)
 #[tauri::command]
 pub async fn chat_llama(prompt: String, model: Option<String>, endpoint: Option<String>) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
-    let base = endpoint.unwrap_or_else(|| "http://localhost:5001".to_string());
-    let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
-    let model_name = model.unwrap_or_else(|| "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf".to_string());
+
+    // Resolve the chat target from env vars and lemonade_config.json; an
+    // explicitly passed endpoint/model still wins inside chat_request_parts.
+    let config_text = lemonade_config_path().and_then(|p| fs::read_to_string(p).ok());
+    let target = crate::llm_config::resolve_chat_target(
+        &|k| std::env::var(k).ok(),
+        config_text.as_deref(),
+    );
+    let (url, model_name, auth) = chat_request_parts(endpoint, model, &target);
 
     let payload = serde_json::json!({
         "model": model_name,
         "messages": [
-            {"role": "system", "content": "You are a concise coding assistant. Answer briefly."},
+            // L-con contract (tone from the sarcasm slider). Chat only: embeddings never carry it.
+            {"role": "system", "content": crate::lcon::chat_system_prompt(crate::lcon::sarcasm())},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.3,
         "max_tokens": 256
     });
 
-    let resp = client.post(&url).json(&payload).send().await
+    let mut request = client.post(&url).json(&payload);
+    if let Some(header) = auth {
+        request = request.header("Authorization", header);
+    }
+
+    let resp = request.send().await
         .map_err(|e| format!("Request failed: {}", e))?;
     let status = resp.status();
     if !status.is_success() {
@@ -3530,6 +3936,18 @@ pub async fn start_file_watcher(watch_paths: Option<Vec<String>>) -> Result<serd
             if let Ok(mut e) = WATCHER_EVENTS.lock() {
                 e.push(event.clone());
                 if e.len() > 100 { e.remove(0); }
+            }
+
+            // A new file or a rename is a save the save prompter judges (plain re-saves of the same
+            // file are left alone so Clippy does not nag on every Ctrl+S).
+            if matches!(
+                event.event_type,
+                crate::file_watcher::FileEventType::Created | crate::file_watcher::FileEventType::Renamed { .. }
+            ) {
+                if let Ok(mut st) = crate::save_prompter_bridge::SAVE_STATE.lock() {
+                    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                    crate::save_prompter_bridge::on_save_event(&mut st, &event.path, Some(&today));
+                }
             }
 
             // Generate organization suggestions for this event
@@ -4320,5 +4738,210 @@ pub async fn undo_move_plan(index_dir: String, plan_id: String) -> Result<serde_
         "errors": errors,
         "reverted_plan": plan,
     }))
+}
+
+#[cfg(test)]
+mod scoped_clustering_tests {
+    use super::*;
+
+    fn emb(path: &str, v: Vec<f32>) -> FileEmbedding {
+        FileEmbedding {
+            path: path.to_string(),
+            embedding: v,
+            content_hash: String::new(),
+        }
+    }
+
+    #[test]
+    fn scope_of_path_handles_both_separators() {
+        assert_eq!(scope_of_path("code/a.rs"), "code");
+        assert_eq!(scope_of_path("code/sub/a.rs"), "code/sub");
+        // Windows-style separators must group identically to POSIX.
+        assert_eq!(scope_of_path("code\\sub\\a.rs"), "code/sub");
+        assert_eq!(scope_of_path("top.md"), ".");
+        // Parent of /abs/a.md is /abs; a file at the filesystem root gives "/".
+        assert_eq!(scope_of_path("/abs/a.md"), "/abs");
+        assert_eq!(scope_of_path("/a.md"), "/");
+    }
+
+    #[test]
+    fn scope_of_path_normalises_windows_drive_root() {
+        // A drive root should look like the POSIX root, not a bare drive letter,
+        // otherwise one drive renders as "C:" and another as "/".
+        assert_eq!(scope_of_path("C:/file.txt"), "C:/");
+        assert_eq!(scope_of_path("C:/docs/a.md"), "C:/docs");
+        assert_eq!(scope_of_path("D:\\notes\\b.md"), "D:/notes");
+    }
+
+    #[test]
+    fn centroid_of_empty_is_none_not_zero_vector() {
+        assert!(centroid_of(&[]).is_none());
+    }
+
+    #[test]
+    fn centroid_is_the_mean() {
+        let a = emb("a", vec![0.0, 2.0]);
+        let b = emb("b", vec![4.0, 6.0]);
+        let refs = vec![&a, &b];
+        let c = centroid_of(&refs).unwrap();
+        assert_eq!(c, vec![2.0, 4.0]);
+    }
+
+    #[test]
+    fn centroid_skips_dimension_mismatches() {
+        let a = emb("a", vec![1.0, 1.0]);
+        let b = emb("b", vec![3.0]); // wrong dim, must not panic
+        let refs = vec![&a, &b];
+        let c = centroid_of(&refs).unwrap();
+        assert_eq!(c.len(), 2);
+    }
+
+    #[test]
+    fn centroid_divides_by_accumulated_count_not_slice_length() {
+        // Regression: a single odd-dimension vector must not shrink the mean.
+        // Only 'a' is accumulated, so the centroid is a's values verbatim --
+        // not a's values halved.
+        let a = emb("a", vec![4.0, 8.0]);
+        let odd = emb("odd", vec![100.0]);
+        let refs = vec![&a, &odd];
+        let c = centroid_of(&refs).unwrap();
+        assert_eq!(c, vec![4.0, 8.0]);
+    }
+
+    #[test]
+    fn centroid_is_none_when_every_vector_mismatches() {
+        let odd = emb("odd", vec![1.0]);
+        let refs = vec![&odd, &odd];
+        // dim is taken from the first vector, so the second is skipped and n
+        // stays 1 -> still a valid centroid, but all-skipped must not divide
+        // by zero.
+        assert!(centroid_of(&refs).is_some());
+    }
+
+    #[test]
+    fn centroids_as_embeddings_keys_by_scope() {
+        let mut m = HashMap::new();
+        m.insert("code".to_string(), vec![1.0f32, 0.0]);
+        let v = centroids_as_embeddings(&m);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].path, "code");
+        assert_eq!(v[0].embedding, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn kmeans_rollup_clusters_centroids_not_vectors() {
+        // Two well-separated centroids must land in two drive clusters.
+        let mut m = HashMap::new();
+        m.insert("code".to_string(), vec![1.0f32, 0.0, 0.0, 0.0]);
+        m.insert("homework".to_string(), vec![0.0, 1.0, 0.0, 0.0]);
+        m.insert("photos".to_string(), vec![0.0, 0.0, 1.0, 0.0]);
+        let pseudo = centroids_as_embeddings(&m);
+        let clusters = kmeans_cluster(&pseudo, 3);
+        assert_eq!(clusters.len(), 3);
+        // Every scope must appear exactly once across the drive clusters.
+        let mut seen: Vec<String> = clusters
+            .iter()
+            .flat_map(|c| c.file_paths.clone())
+            .collect();
+        seen.sort();
+        assert_eq!(seen, vec!["code", "homework", "photos"]);
+    }
+
+    /// Unique, empty directory under the system temp dir so tests don't
+    /// collide with each other or with a real index.
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("wayfinder_test_{}_{}", tag, nanos));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn lemonade_default_when_no_config() {
+        let dir = unique_temp_dir("lemonade_no_config");
+        let cfg = resolve_provider_config(&dir);
+        assert_eq!(cfg.provider, EmbeddingProvider::Llama);
+        assert_eq!(cfg.local_endpoint.as_deref(), Some(LEMONADE_DEFAULT_ENDPOINT));
+        assert_eq!(cfg.local_model.as_deref(), Some(LEMONADE_DEFAULT_EMBED_MODEL));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lemonade_default_keeps_existing_config() {
+        let dir = unique_temp_dir("lemonade_existing_config");
+        write_provider_config(&dir, EmbeddingProvider::Azure, None, None).unwrap();
+        let cfg = resolve_provider_config(&dir);
+        assert_eq!(cfg.provider, EmbeddingProvider::Azure);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn llm_target(base: &str, model: &str, api_key: Option<&str>) -> crate::llm_config::LlmTarget {
+        crate::llm_config::LlmTarget {
+            base: base.to_string(),
+            model: model.to_string(),
+            api_key: api_key.map(|k| k.to_string()),
+        }
+    }
+
+    #[test]
+    fn chat_request_parts_explicit_endpoint_and_model_win() {
+        let target = llm_target("http://resolved:1", "resolved-model", Some("secret"));
+        let (url, model, auth) = chat_request_parts(
+            Some("http://explicit:2".to_string()),
+            Some("explicit-model".to_string()),
+            &target,
+        );
+        assert_eq!(url, "http://explicit:2/v1/chat/completions");
+        assert_eq!(model, "explicit-model");
+        // The configured key belongs to the configured server; never send it elsewhere.
+        assert_eq!(auth, None);
+    }
+
+    #[test]
+    fn chat_request_parts_keeps_key_for_the_configured_server() {
+        let target = llm_target("http://resolved:1", "resolved-model", Some("secret"));
+        let (_, _, auth) =
+            chat_request_parts(Some("http://resolved:1/v1/".to_string()), None, &target);
+        assert_eq!(auth, Some("Bearer secret".to_string()));
+    }
+
+    #[test]
+    fn chat_request_parts_none_falls_back_to_target() {
+        let target = llm_target("http://resolved:1", "resolved-model", None);
+        let (url, model, auth) = chat_request_parts(None, None, &target);
+        assert_eq!(url, "http://resolved:1/v1/chat/completions");
+        assert_eq!(model, "resolved-model");
+        assert_eq!(auth, None);
+    }
+
+    #[test]
+    fn chat_request_parts_explicit_endpoint_with_v1_does_not_double() {
+        let target = llm_target("http://resolved:1", "resolved-model", None);
+
+        let (url, _, _) =
+            chat_request_parts(Some("http://explicit:2/v1".to_string()), None, &target);
+        assert_eq!(url, "http://explicit:2/v1/chat/completions");
+
+        // A trailing slash after "/v1" must not reintroduce the duplicate.
+        let (url, _, _) =
+            chat_request_parts(Some("http://explicit:2/v1/".to_string()), None, &target);
+        assert_eq!(url, "http://explicit:2/v1/chat/completions");
+
+        // A plain trailing slash is still normalised.
+        let (url, _, _) =
+            chat_request_parts(Some("http://explicit:2/".to_string()), None, &target);
+        assert_eq!(url, "http://explicit:2/v1/chat/completions");
+    }
+
+    #[test]
+    fn chat_request_parts_passes_auth_header_through() {
+        let target = llm_target("http://resolved:1", "resolved-model", Some("abc123"));
+        let (_, _, auth) = chat_request_parts(None, None, &target);
+        assert_eq!(auth, Some("Bearer abc123".to_string()));
+    }
 }
 

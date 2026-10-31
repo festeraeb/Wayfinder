@@ -33,18 +33,43 @@ export const tauriService = {
         });
     },
 
+    /// Hierarchical clustering: per-folder clusters plus a drive-level rollup
+    /// computed from one centroid per folder (never by re-clustering every
+    /// member vector). Writes scoped_clusters.json; clusters.json is untouched.
+    async createScopedClusters(
+        indexDir: string,
+        minPerScope?: number
+    ): Promise<Types.ScopedClusterResult> {
+        return invoke("create_scoped_clusters", {
+            indexDir,
+            minPerScope,
+        });
+    },
+
+    /// Read back scoped_clusters.json. Returns an empty-but-valid shape when
+    /// no scoped clustering has been run yet, rather than throwing.
+    async getScopedClusters(indexDir: string): Promise<Types.ScopedClusters> {
+        return invoke("get_scoped_clusters", { indexDir });
+    },
+
+    /// Hybrid semantic + keyword search. `mode` is "keyword" (with a `note` saying why) when the
+    /// query could not be embedded, so the UI never claims a semantic answer it did not compute.
+    async semanticSearch(
+        query: string,
+        indexDir: string,
+        topK: number = 10,
+        semanticWeight: number = 0.7
+    ): Promise<{ mode: "semantic" | "keyword"; note: string | null; results: Types.SearchResult[] }> {
+        return invoke("semantic_search", { query, indexDir, topK, semanticWeight });
+    },
+
     async search(
         query: string,
         indexDir: string,
         topK: number = 10,
         semanticWeight: number = 0.7
     ): Promise<Types.SearchResult[]> {
-        return invoke("search", {
-            query,
-            indexDir,
-            topK,
-            semanticWeight,
-        });
+        return (await this.semanticSearch(query, indexDir, topK, semanticWeight)).results;
     },
 
     async getClustersSummary(indexDir: string): Promise<Types.ClustersSummary> {
@@ -191,6 +216,10 @@ export const tauriService = {
         return invoke("chat_llama", { prompt, model, endpoint });
     },
 
+    async checkLemonadeSetup(base?: string, chatModel?: string, embedModel?: string): Promise<Types.LemonadeSetupReport> {
+        return invoke("check_lemonade_setup", { base, chatModel, embedModel });
+    },
+
     async executeClippyAction(repoPath: string, action: string, data?: any): Promise<{ success: boolean; output: string }> {
         return invoke("execute_clippy_action", { repoPath, action, data });
     },
@@ -210,6 +239,23 @@ export const tauriService = {
 
     async getFileEvents(clear?: boolean): Promise<Types.FileEventsResponse> {
         return invoke("get_file_events", { clear });
+    },
+
+    async getSavePrompts(clear?: boolean): Promise<Types.SavePromptsResponse> {
+        return invoke("get_save_prompts", { clear });
+    },
+
+    async setSaveStrictness(level: number): Promise<{ success: boolean; strictness: number }> {
+        return invoke("set_save_strictness", { level });
+    },
+
+    // L-con: the sarcasm slider sets the chat contract's tone and caps Mr. Clippy's
+    async setInteractionSettings(sarcasmLevel: number): Promise<{ success: boolean; sarcasm_level: number }> {
+        return invoke("set_interaction_settings", { sarcasmLevel });
+    },
+
+    async getChatContract(): Promise<{ sarcasm_level: number; prompt: string; chars: number; est_tokens: number }> {
+        return invoke("get_chat_contract");
     },
 
     async getWatcherStatus(): Promise<Types.WatcherStatus> {

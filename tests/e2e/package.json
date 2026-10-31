@@ -1,0 +1,7 @@
+{
+  "name": "wayfinder-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Playwright e2e for Wayfinder: Lemonade setup check, chat, embeddings + semantic search, save prompter, commit nudge.",
+  "dependencies": { "playwright-core": "1.55.1" }
+}

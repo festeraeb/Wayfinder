@@ -4,12 +4,18 @@ import { useTheme } from "./hooks/useTauri";
 import { open } from "@tauri-apps/plugin-dialog";
 import { GitAssistant } from "./components/GitAssistant";
 import { NautiClippy } from "./components/NautiClippy";
+import { LemonadeSetupPanel } from "./components/LemonadeSetupPanel";
+import SavePromptToast from "./components/notifications/SavePromptToast";
 import { useFileWatcher } from "./hooks/useFileWatcher";
 import { useNotifications } from "./components/notifications/NotificationProvider";
 import Modal from "./components/Modal";
 import "./styles/global.css";
 import "./styles/app.css";
 import "./styles/panels.css";
+
+// Defaults for the embedding server: a local Lemonade (same values as the Rust defaults).
+const LEMONADE_BASE = "http://127.0.0.1:13305/api";
+const LEMONADE_EMBED_MODEL = "nomic-embed-text-v1-GGUF";
 
 // File type presets
 const FILE_TYPE_PRESETS = {
@@ -25,7 +31,7 @@ const FILE_TYPE_PRESETS = {
 };
 
 type OperationStatus = "idle" | "running" | "complete" | "error";
-type ActiveSection = "status" | "scan" | "embed" | "cluster" | "search" | "timeline" | "git" | "nauti" | "org";
+type ActiveSection = "status" | "scan" | "embed" | "cluster" | "search" | "timeline" | "git" | "nauti" | "org" | "lemonade";
 
 interface Reminder {
     id: string;
@@ -121,13 +127,13 @@ export default function App() {
 
     // Embedding provider config state
     const [embeddingProvider, setEmbeddingProvider] = useState<"local" | "llama" | "azure" | "gcp" | "multi">("llama");
-    const [localModel, setLocalModel] = useState("embeddinggemma-300m-f16");
-    const [localEndpoint, setLocalEndpoint] = useState("http://localhost:5002");
+    const [localModel, setLocalModel] = useState(LEMONADE_EMBED_MODEL);
+    const [localEndpoint, setLocalEndpoint] = useState(LEMONADE_BASE);
 
     // Global quick-config modal
     const [showGlobalConfig, setShowGlobalConfig] = useState(false);
-    const [llamaChatEndpoint, setLlamaChatEndpoint] = useState("http://localhost:5001");
-    const [llamaChatModel, setLlamaChatModel] = useState("qwen2.5-coder-1.5b-instruct-q4_k_m.gguf");
+    const [llamaChatEndpoint, setLlamaChatEndpoint] = useState("");
+    const [llamaChatModel, setLlamaChatModel] = useState("");
     
     // Azure state
     const [azureConfigured, setAzureConfigured] = useState(false);
@@ -157,6 +163,7 @@ export default function App() {
     // Search state
     const [searchQuery, setSearchQuery] = useState("");
     const [searchResults, setSearchResults] = useState<any[]>([]);
+    const [searchMode, setSearchMode] = useState<{ mode: string; note: string | null; query: string } | null>(null);
     const [topK, setTopK] = useState(10);
     const [semanticWeight, setSemanticWeight] = useState(0.7);
 
@@ -371,12 +378,12 @@ export default function App() {
             if (provider.local_model) {
                 setLocalModel(provider.local_model);
             } else {
-                setLocalModel("embeddinggemma-300m-f16");
+                setLocalModel(LEMONADE_EMBED_MODEL);
             }
             if (provider.local_endpoint) {
                 setLocalEndpoint(provider.local_endpoint);
             } else {
-                setLocalEndpoint("http://localhost:5002");
+                setLocalEndpoint(LEMONADE_BASE);
             }
             if (provider.provider === "azure") {
                 await loadAzureConfig(dir);
@@ -388,8 +395,8 @@ export default function App() {
             }
         } catch (error) {
             setEmbeddingProvider("llama");
-            setLocalModel("embeddinggemma-300m-f16");
-            setLocalEndpoint("http://localhost:5002");
+            setLocalModel(LEMONADE_EMBED_MODEL);
+            setLocalEndpoint(LEMONADE_BASE);
         }
     };
         
@@ -796,8 +803,9 @@ export default function App() {
         if (!searchQuery.trim() || !indexPath) return;
 
         try {
-            const results = await tauriService.search(searchQuery, indexPath, topK, semanticWeight);
-            setSearchResults(results);
+            const res = await tauriService.semanticSearch(searchQuery, indexPath, topK, semanticWeight);
+            setSearchResults(res.results);
+            setSearchMode({ mode: res.mode, note: res.note, query: searchQuery });
         } catch (error) {
             console.error("Search error:", error);
         }
@@ -826,10 +834,12 @@ export default function App() {
         { id: "git", icon: "📎", label: "Git Clippy" },
         { id: "nauti", icon: "🧭", label: "Nauti-Clippy" },
         { id: "org", icon: "🗃️", label: "Org" },
+        { id: "lemonade", icon: "🍋", label: "Lemonade" },
     ];
 
     return (
         <div className="app-container">
+            <SavePromptToast active={watcherActive} />
             {/* Sidebar Navigation */}
             <aside className="sidebar">
                 <div className="sidebar-header">
@@ -842,6 +852,7 @@ export default function App() {
                         <button
                             key={item.id}
                             className={`nav-item ${activeSection === item.id ? "active" : ""}`}
+                            data-testid={`nav-${item.id}`}
                             onClick={() => setActiveSection(item.id)}
                         >
                             <span className="nav-icon">{item.icon}</span>
@@ -931,7 +942,7 @@ export default function App() {
 
                 {/* Error Display */}
                 {errorMsg && (
-                    <div className="error-banner">
+                    <div className="error-banner" data-testid="error-banner">
                         ❌ {errorMsg}
                         <button onClick={() => setErrorMsg("")}>✕</button>
                     </div>
@@ -1103,6 +1114,7 @@ export default function App() {
                                 <input
                                     type="text"
                                     placeholder="Enter folder path..."
+                                    data-testid="scan-path"
                                     value={scanPath}
                                     onChange={(e) => setScanPath(e.target.value)}
                                     className="folder-input"
@@ -1158,6 +1170,7 @@ export default function App() {
                         <div className="action-row">
                             <button 
                                 className="btn btn-primary btn-large"
+                                data-testid="scan-start"
                                 onClick={handleScan}
                                 disabled={scanStatus === "running"}
                             >
@@ -1253,14 +1266,14 @@ export default function App() {
                                                 }}
                                             >
                                                 <option value="local">Local (Deterministic CPU)</option>
-                                                <option value="llama">Local llama.cpp (GPU/CPU)</option>
+                                                <option value="llama">Lemonade / llama.cpp server (OpenAI-compatible)</option>
                                                 <option value="azure">Azure OpenAI</option>
                                                 <option value="gcp">Google Cloud Vertex AI</option>
                                                 <option value="multi">Multi-Provider (GCP → Azure → Local)</option>
                                             </select>
                                             <small>
                                                 {embeddingProvider === "local" && "Runs offline (deterministic, CPU)."}
-                                                {embeddingProvider === "llama" && "Uses your local llama.cpp server (GPU/CPU)."}
+                                                {embeddingProvider === "llama" && "Uses your local Lemonade (or llama.cpp) server through its OpenAI-style embeddings API."}
                                                 {embeddingProvider === "azure" && "Uses Azure OpenAI API."}
                                                 {embeddingProvider === "gcp" && "Uses Google Vertex AI API."}
                                                 {embeddingProvider === "multi" && "Tries GCP, then Azure, then local — always gets an embedding."}
@@ -1282,14 +1295,14 @@ export default function App() {
 
                                         {embeddingProvider === "llama" && (
                                             <div className="form-group">
-                                                <label>Local Endpoint (llama.cpp server):</label>
+                                                <label>Server endpoint (Lemonade or llama.cpp):</label>
                                                 <input
                                                     type="text"
-                                                    placeholder="http://127.0.0.1:8080"
+                                                    placeholder="http://127.0.0.1:13305/api"
                                                     value={localEndpoint}
                                                     onChange={(e) => setLocalEndpoint(e.target.value)}
                                                 />
-                                                <small>Run llama.cpp server with your Qwen/Gemma models and point here.</small>
+                                                <small>Default is a local Lemonade. Use the Lemonade tab to check that it is set up.</small>
                                             </div>
                                         )}
 
@@ -1471,6 +1484,7 @@ export default function App() {
                                 <div className="action-row">
                                     <button
                                         className="btn btn-primary btn-large"
+                                        data-testid="embed-start"
                                         onClick={handleEmbed}
                                         disabled={embedStatus === "running" || (embeddingProvider === "azure" && !azureConfigured) || (embeddingProvider === "gcp" && !gcpConfigured)}
                                     >
@@ -1522,7 +1536,8 @@ export default function App() {
                                 />
 
                                 {embedResult && (
-                                    <div className="embed-result">
+                                    <div className="embed-result" data-testid="embed-result">
+                                        <p data-testid="embed-generated">Generated: {embedResult.embeddings_generated ?? embedResult.generated_count ?? 0}</p>
                                         <p>Cached: {embedResult.cached_count || 0} (unchanged files)</p>
                                         {embedResult.error_count > 0 && (
                                             <p className="warning">Errors: {embedResult.error_count} files failed</p>
@@ -1698,12 +1713,13 @@ export default function App() {
                                         <input
                                             type="text"
                                                 placeholder="What are you looking for?"
+                                                data-testid="search-query"
                                                 value={searchQuery}
                                                 onChange={(e) => setSearchQuery(e.target.value)}
                                                 onKeyDown={(e) => e.key === "Enter" && handleSearch()}
                                                 className="search-input"
                                             />
-                                            <button className="btn btn-primary" onClick={handleSearch}>
+                                            <button className="btn btn-primary" data-testid="search-go" onClick={handleSearch}>
                                                 Search
                                             </button>
                                         </div>
@@ -1738,8 +1754,13 @@ export default function App() {
                                         ) : (
                                             <>
                                                 <p className="results-count">{searchResults.length} results found</p>
+                                                {searchMode && (
+                                                    <p className="hint" data-testid="search-mode" data-mode={searchMode.mode} data-query={searchMode.query}>
+                                                        {searchMode.mode === "semantic" ? "Ranked by meaning (embeddings) plus keywords." : (searchMode.note || "Keyword search only.")}
+                                                    </p>
+                                                )}
                                                 {searchResults.map((result, i) => (
-                                                    <div key={i} className="search-result-item">
+                                                    <div key={i} className="search-result-item" data-testid="search-result">
                                                         <div className="result-header">
                                                             <span className="result-name">{result.name}</span>
                                                             {result.score && (
@@ -1876,7 +1897,7 @@ export default function App() {
                                     </label>
                                     {useSmartClassifier && (
                                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
-                                            <input type="text" placeholder="http://localhost:5001" value={smartLlmEndpoint} onChange={(e) => setSmartLlmEndpoint(e.target.value)} />
+                                            <input type="text" placeholder="blank = local Lemonade (http://127.0.0.1:13305/api)" value={smartLlmEndpoint} onChange={(e) => setSmartLlmEndpoint(e.target.value)} />
                                             <input type="text" placeholder="qwen2.5-coder-14b-instruct" value={smartLlmModel} onChange={(e) => setSmartLlmModel(e.target.value)} />
                                             <input type="number" placeholder="LLM limit" value={smartLlmLimit} onChange={(e) => setSmartLlmLimit(e.target.value ? parseInt(e.target.value) : 0)} />
                                             <input type="number" step="0.1" placeholder="Min score before LLM" value={smartLlmMinScore} onChange={(e) => setSmartLlmMinScore(e.target.value ? parseFloat(e.target.value) : 0)} />
@@ -1965,6 +1986,7 @@ export default function App() {
                                 <input
                                     type="text"
                                     placeholder="Select a git repository"
+                                    data-testid="git-repo-path"
                                     value={gitRepoPath}
                                     onChange={(e) => setGitRepoPath(e.target.value)}
                                     className="folder-input"
@@ -2005,6 +2027,14 @@ export default function App() {
                             chatEndpoint={llamaChatEndpoint || undefined}
                             chatModel={llamaChatModel || undefined}
                         />
+                    </section>
+                )}
+
+                {activeSection === "lemonade" && (
+                    <section className="content-section">
+                        <h2>🍋 Lemonade</h2>
+                        <p className="section-desc">Wayfinder embeds your files and chats through a local Lemonade server. Check that it is up and has the models.</p>
+                        <LemonadeSetupPanel />
                     </section>
                 )}
 
@@ -2052,7 +2082,7 @@ export default function App() {
                                                 }}
                                             >
                                                 <option value="local">Local (Deterministic CPU)</option>
-                                                <option value="llama">Local llama.cpp (GPU/CPU)</option>
+                                                <option value="llama">Lemonade / llama.cpp server (OpenAI-compatible)</option>
                                                 <option value="azure">Azure OpenAI</option>
                                                 <option value="gcp">Google Cloud Vertex AI</option>
                                                 <option value="multi">Multi-Provider (GCP → Azure → Local)</option>
@@ -2076,7 +2106,7 @@ export default function App() {
                                                 <label>Local Endpoint (llama.cpp embeddings):</label>
                                                 <input
                                                     type="text"
-                                                    placeholder="http://127.0.0.1:8080"
+                                                    placeholder="http://127.0.0.1:13305/api"
                                                     value={localEndpoint}
                                                     onChange={(e) => setLocalEndpoint(e.target.value)}
                                                 />
@@ -2174,7 +2204,7 @@ export default function App() {
                                             <label>Chat Endpoint:</label>
                                             <input
                                                 type="text"
-                                                placeholder="http://localhost:5001"
+                                                placeholder="blank = local Lemonade (http://127.0.0.1:13305/api)"
                                                 value={llamaChatEndpoint}
                                                 onChange={(e) => setLlamaChatEndpoint(e.target.value)}
                                             />
@@ -2184,7 +2214,7 @@ export default function App() {
                                             <label>Chat Model:</label>
                                             <input
                                                 type="text"
-                                                placeholder="qwen2.5-coder-1.5b-instruct"
+                                                placeholder="blank = Qwen3-4B-Instruct-2507-GGUF"
                                                 value={llamaChatModel}
                                                 onChange={(e) => setLlamaChatModel(e.target.value)}
                                             />

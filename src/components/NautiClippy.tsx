@@ -52,7 +52,7 @@ export const NautiClippy: React.FC<Props> = ({ defaultPaths }) => {
         setChatLoading(true);
         setChatError(null);
         try {
-            const res = await tauriService.chatLlama(chatInput, "qwen2.5-coder-1.5b-instruct", undefined);
+            const res = await tauriService.chatLlama(chatInput, undefined, undefined);
             setChatReply(res.text);
         } catch (e) {
             setChatError(String(e));

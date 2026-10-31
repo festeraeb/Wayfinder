@@ -1,6 +1,8 @@
 # Lemonade Setup for Wayfinder
 
-Free local AI for Wayfinder via AMD Lemonade. No API keys needed.
+Free local AI for Wayfinder via AMD Lemonade. A local Lemonade needs no API key.
+
+Wayfinder's default address is `http://127.0.0.1:13305/api`, Lemonade's own default port. Its Lemonade page has a **Check Lemonade** button that tests the address, both models, one embedding and one chat reply, and says which step failed.
 
 ## Quick Setup
 
@@ -12,17 +14,17 @@ If you have an AMD GPU (WX 5100, RX 580, etc.):
 # Install Lemonade
 pip install lemonade-sdk
 
-# Start the server
-lemond --host 127.0.0.1 --port 13306
+# Start the server (default port 13305)
+lemond --host 127.0.0.1 --port 13305
 
 # Install Vulkan backend
-lemonade --port 13306 backends install llamacpp:vulkan
+lemonade backends install llamacpp:vulkan
 
-# Pull an embedding model
-lemonade --port 13306 pull embeddinggemma-300m-f16
+# Pull an embedding model (Wayfinder's default)
+lemonade pull nomic-embed-text-v1-GGUF
 
 # Pull a chat model
-lemonade --port 13306 pull qwen2.5-coder-1.5b-instruct-q4_k_m
+lemonade pull qwen2.5-coder-1.5b-instruct-q4_k_m
 ```
 
 ### Option 2: CESARops Community Endpoint (Free, No Setup)
@@ -34,12 +36,34 @@ Chat LLM:    https://cesarops.com/lemonade/v1
 Model:       nauti-recovery (Qwen3-0.6B, CPU)
 Embeddings:  https://cesarops.com/lemonade/v1
 Model:       embeddinggemma-300m (768 dimensions)
-API Key:     none needed
+API Key:     needed (the endpoint has been key-gated since 2026-10-22)
 ```
+
+**How to get a key:** email **wayfinder@cesarops.com** (any subject, any text). An automatic reply brings you
+a personal key (`wf_...`) that works for 30 days. Put it in `.wayfinder_index/lemonade_config.json` as
+`"api_key"` (or set `WAYFINDER_LLM_API_KEY`). Email again for a new key; it replaces your old one straight away
+(at most 3 per address per day). We keep only a hash of your address to stop abuse.
 
 Just copy `lemonade_config.template.json` to `.wayfinder_index/lemonade_config.json` and it works.
 
-### Option 3: Any OpenAI-Compatible Server
+### Option 3: A Lemonade on another computer, through a Lemonade Nexus mesh
+
+If the Lemonade with the GPU is on another machine (a school server, a teacher's PC), a Lemonade Nexus
+client device on your machine gives you a local mesh port that looks like one Lemonade. Point Wayfinder at
+it:
+
+```
+Lemonade address:  http://127.0.0.1:13306/api
+Chat model:        <device>/<model>      e.g. c4-test-lemond/qwen2.5-coder-1.5b-instruct-q6_k
+Embedding model:   <device>/<model>      e.g. c4-test-lemond/nomic-embed-text-v1-GGUF
+```
+
+Tested 2026-10-30 and again 2026-10-31: the Wayfinder end-to-end suite passed 12/12 this way (setup check,
+chat, embeddings, semantic search, save prompter, commit nudge), with every Lemonade call crossing the mesh to
+a GTX 1070 on another machine. Setting up the mesh is in the Lemonade Nexus fork's
+`docs/Operator-Trust-Bootstrap.md`. This uses a self-hosted test network; it is not a hosted service.
+
+### Option 4: Any OpenAI-Compatible Server
 
 Wayfinder works with any server that exposes `/v1/chat/completions` and `/v1/embeddings`:
 - Lemonade (AMD, Vulkan)
@@ -55,13 +79,13 @@ Wayfinder works with any server that exposes `/v1/chat/completions` and `/v1/emb
 
 In Wayfinder's Embeddings section:
 - **Provider**: Llama (local server)
-- **Endpoint**: `http://localhost:13306/v1` (local) or `https://cesarops.com/lemonade/v1` (remote)
-- **Model**: `embeddinggemma-300m-f16`
+- **Endpoint**: `http://127.0.0.1:13305/api` (local), `http://127.0.0.1:13306/api` (Nexus mesh port) or `https://cesarops.com/lemonade/v1` (remote, key needed)
+- **Model**: `nomic-embed-text-v1-GGUF` (default; 768 numbers per embedding)
 
 ### Chat LLM (for Git Clippy, task decomposition)
 
 In Wayfinder's Git Clippy / Task Decomposer:
-- **Endpoint**: `http://localhost:13306/v1` (local) or `https://cesarops.com/lemonade/v1` (remote)
+- **Endpoint**: same choices as above
 - **Model**: `qwen2.5-coder-1.5b-instruct-q4_k_m`
 
 ## System Prompt for Wayfinder Tasks
@@ -84,6 +108,7 @@ Don't over-explain. ADHD users need focus, not walls of text.
 ## AMD Hardware Notes
 
 - **No ROCm needed**: Lemonade uses Vulkan (mesa radv) on consumer AMD
+- **ROCm works too**: Qwen3-14B (Q4_0) on an RX 6700 XT through Lemonade's ROCm llama.cpp ran at 37.96 tok/s median over 10 prompts, first token 73 ms median (2026-10-31)
 - **Verified on**: AMD Radeon Pro WX 5100, RX 580
 - **Performance**: Sufficient for embeddings and small chat models
 - **Future**: Strix Halo (128GB unified) would serve entire classrooms

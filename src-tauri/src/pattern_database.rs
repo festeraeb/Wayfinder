@@ -100,7 +100,11 @@ pub fn init_database(data_dir: &str) -> Result<Connection, String> {
         -- Create indices for common queries
         CREATE INDEX IF NOT EXISTS idx_decisions_file ON decisions(file_path);
         CREATE INDEX IF NOT EXISTS idx_decisions_type ON decisions(suggestion_type);
-        CREATE INDEX IF NOT EXISTS idx_patterns_type ON naming_patterns(pattern_type);
+        DROP INDEX IF EXISTS idx_patterns_type;
+        -- Databases made before the unique index may hold duplicate pattern types; keep the newest row.
+        DELETE FROM naming_patterns WHERE id NOT IN (SELECT MAX(id) FROM naming_patterns GROUP BY pattern_type);
+        -- The upsert in record_decision needs a UNIQUE index to hang ON CONFLICT(pattern_type) on.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_patterns_type_unique ON naming_patterns(pattern_type);
     "#).map_err(|e| format!("Failed to create tables: {}", e))?;
     
     println!("[PATTERN_DB] Database initialized at {}", db_path);

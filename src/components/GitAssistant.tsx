@@ -66,6 +66,7 @@ interface GitClippyReport {
     duplicates: DuplicateFile[];
     commit_suggestions: CommitSuggestion[];
     copy_pattern_files: FileSuggestion[];
+    commit_nudge?: 'none' | 'gentle' | 'firm' | 'loud';
 }
 
 interface Props {
@@ -183,7 +184,7 @@ export const GitAssistant: React.FC<Props> = ({ repoPath, indexPath, chatEndpoin
         setChatLoading(true);
         setChatError(null);
         try {
-            const res = await tauriService.chatLlama(chatInput, chatModel || "qwen2.5-coder-1.5b-instruct", chatEndpoint || undefined);
+            const res = await tauriService.chatLlama(chatInput, chatModel || undefined, chatEndpoint || undefined);
             setChatReply(res.text);
         } catch (e) {
             setChatError(String(e));
@@ -294,6 +295,13 @@ export const GitAssistant: React.FC<Props> = ({ repoPath, indexPath, chatEndpoin
                 <span className="clippy-icon">{getUrgencyEmoji(report.urgency_level)}</span>
                 <div className="clippy-message">
                     <p style={{ whiteSpace: 'pre-line' }}>{report.message}</p>
+                    {report.commit_nudge && report.commit_nudge !== 'none' && (
+                        <p data-testid="commit-nudge" className={`commit-nudge nudge-${report.commit_nudge}`}>
+                            {report.commit_nudge === 'gentle' && 'Psst. A commit would be nice soon.'}
+                            {report.commit_nudge === 'firm' && 'It has been a while. Commit your work.'}
+                            {report.commit_nudge === 'loud' && 'COMMIT. Your work is piling up without a safety net.'}
+                        </p>
+                    )}
                     {report.urgency_level === 'existential_crisis' || report.urgency_level === 'panic' ? (
                         <span className="urgency-badge" style={{
                             background: getUrgencyColor(report.urgency_level),

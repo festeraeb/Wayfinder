@@ -18,6 +18,44 @@ export interface ClusterResult {
     message?: string;
 }
 
+/// Result of the hierarchical (per-folder) clustering run.
+export interface ScopedClusterResult {
+    clusters_created: number;
+    scope_count: number;
+    total_files: number;
+    message?: string;
+}
+
+export interface ScopedClusterFile {
+    name: string;
+    path: string;
+}
+
+export interface ScopedClusterSummary {
+    id: number;
+    files: ScopedClusterFile[];
+    file_count: number;
+}
+
+/// `scoped_clusters.json` as returned by get_scoped_clusters.
+///
+/// Note: in `drive`, `file_paths` entries are FOLDER paths (scopes), not file
+/// paths. `drive_display` carries the same data pre-shaped for rendering.
+export interface ScopedClusters {
+    scopes: Record<string, unknown>;
+    drive: Array<{
+        id: number;
+        centroid: number[];
+        file_paths: string[];
+        label: string | null;
+    }>;
+    drive_display?: ScopedClusterSummary[];
+    scope_to_drive: Record<string, number>;
+    scope_count: number;
+    total_files: number;
+    message?: string;
+}
+
 export interface SearchResult {
     path: string;
     name: string;
@@ -183,6 +221,22 @@ export interface FileEventsResponse {
     events: FileEvent[];
 }
 
+// Save prompter (Mr. Clippy): one prompt for a messy save.
+export interface SavePrompt {
+    path: string;
+    reasons: string[];
+    suggested_name: string;
+    line: string;
+    level: number;
+}
+
+export interface SavePromptsResponse {
+    success: boolean;
+    count: number;
+    prompts: SavePrompt[];
+    strictness: number;
+}
+
 export interface WatcherStatus {
     success: boolean;
     is_running: boolean;
@@ -288,6 +342,7 @@ export interface GitClippyReport {
     suggestions: ClippySuggestion[];
     duplicates: DuplicateFile[];
     commit_suggestions: CommitSuggestion[];
+    commit_nudge?: 'none' | 'gentle' | 'firm' | 'loud';
 }
 
 export interface NautiReport {
@@ -345,4 +400,21 @@ export interface UndoMovePlanResult {
     success: boolean;
     errors: string[];
     reverted_plan: MovePlan;
+}
+
+/** Result of the Lemonade setup check: every field is something actually observed. */
+export interface LemonadeSetupReport {
+    all_ok: boolean;
+    base: string;
+    chat_model: string;
+    embed_model: string;
+    models_ok: boolean;
+    chat_model_present: boolean;
+    chat_model_downloaded: boolean;
+    embed_model_present: boolean;
+    embed_model_downloaded: boolean;
+    embed_checkpoint: string | null;
+    embed_dim: number | null;
+    chat_reply: string | null;
+    problems: string[];
 }

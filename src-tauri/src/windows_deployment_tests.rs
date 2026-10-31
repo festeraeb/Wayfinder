@@ -13,6 +13,7 @@ mod windows_deployment_tests {
     }
 
     #[test]
+    #[cfg(windows)] // absolute-path rules for drive letters only hold on Windows
     fn test_path_handling_backslashes() {
         // Windows uses backslashes, ensure path handling works
         let test_path = r"C:\Temp\md-scanner\.wayfinder_index";
@@ -21,6 +22,7 @@ mod windows_deployment_tests {
     }
 
     #[test]
+    #[cfg(windows)] // absolute-path rules for drive letters only hold on Windows
     fn test_path_handling_forward_slashes() {
         // Test forward slash compatibility on Windows
         let test_path = "C:/Temp/md-scanner/.wayfinder_index";
