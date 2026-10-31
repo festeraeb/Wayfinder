@@ -83,6 +83,7 @@ pub mod lemonade_check;
 pub mod setup_commands;
 pub mod semantic_search;
 pub mod embedder_id;
+pub mod updater;
 
 #[cfg(test)]
 mod windows_deployment_tests;

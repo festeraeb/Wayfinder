@@ -9,8 +9,10 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .setup(|_app| {
-            // Initialize app state if needed
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            // Update check on start and on a timer, and the authenticated push endpoint.
+            wayfinder_tauri::updater::start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(wayfinder_tauri::wayfinder_handler!())
