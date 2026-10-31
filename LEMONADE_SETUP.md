@@ -33,9 +33,9 @@ Point Wayfinder at the shared CESARops server — no local GPU needed:
 
 ```
 Chat LLM:    https://cesarops.com/lemonade/v1
-Model:       nauti-recovery (Qwen3-0.6B, CPU)
+Model:       Qwen3-4B-Instruct-2507-GGUF
 Embeddings:  https://cesarops.com/lemonade/v1
-Model:       embeddinggemma-300m (768 dimensions)
+Model:       nomic-embed-text-v1-GGUF
 API Key:     needed (the endpoint has been key-gated since 2026-10-22)
 ```
 

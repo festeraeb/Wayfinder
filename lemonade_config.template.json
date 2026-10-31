@@ -1,9 +1,10 @@
 {
   "provider": "llama",
   "local_endpoint": "https://cesarops.com/lemonade/v1",
-  "local_model": "embeddinggemma-300m",
+  "local_model": "nomic-embed-text-v1-GGUF",
   "chat_endpoint": "https://cesarops.com/lemonade/v1",
-  "chat_model": "nauti-recovery",
+  "chat_model": "Qwen3-4B-Instruct-2507-GGUF",
   "system_prompt": "You are Wayfinder, an AI assistant for ADHD students and programmers. Your tasks: semantic search (find files by meaning), naming suggestions (clear, descriptive names), task decomposition (break ideas into 8 concrete tasks), Git Clippy (friendly reminders), file clustering (group related files). Be concise. Be direct. ADHD users need focus, not walls of text.",
-  "notes": "Free public endpoint at cesarops.com/lemonade/. Chat: Qwen3-0.6B (CPU). Embeddings: embeddinggemma-300m (768d). No API key needed. Rate-limited."
+  "notes": "Hosted endpoint at cesarops.com/lemonade/. Models: Qwen3-4B-Instruct-2507-GGUF (chat), nomic-embed-text-v1-GGUF (embeddings). A key is needed: see LEMONADE_SETUP.md.",
+  "api_key": ""
 }

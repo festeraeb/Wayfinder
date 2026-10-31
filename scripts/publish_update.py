@@ -114,6 +114,8 @@ def main(argv=None):
         dest.mkdir(parents=True, exist_ok=True)
         shutil.copy2(staged, dest / name)
         shutil.copy2(sig_file, dest / (name + ".sig"))
+        for f in (dest / name, dest / (name + ".sig")):
+            os.chmod(f, 0o644)  # the web server must be able to read them
         # installer first, manifest last: a client never sees a manifest whose file is missing
         write_atomic(a.web_root / "latest.json", json.dumps(manifest, indent=2) + "\n")
         print(f"published {a.version}: {url}")
