@@ -39,7 +39,10 @@ Model:       embeddinggemma-300m (768 dimensions)
 API Key:     needed (the endpoint has been key-gated since 2026-10-22)
 ```
 
-How people get a key is not decided yet. [[operator: decide and fill in]]
+**How to get a key:** email **wayfinder@cesarops.com** (any subject, any text). An automatic reply brings you
+a personal key (`wf_...`) that works for 30 days. Put it in `.wayfinder_index/lemonade_config.json` as
+`"api_key"` (or set `WAYFINDER_LLM_API_KEY`). Email again for a new key; it replaces your old one straight away
+(at most 3 per address per day). We keep only a hash of your address to stop abuse.
 
 Just copy `lemonade_config.template.json` to `.wayfinder_index/lemonade_config.json` and it works.
 
