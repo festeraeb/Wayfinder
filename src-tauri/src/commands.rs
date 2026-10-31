@@ -759,7 +759,7 @@ pub async fn generate_embeddings_llama(index_dir: String, max_files: Option<usiz
 
     let client = reqwest::Client::new();
     let base = endpoint.unwrap_or_else(|| "http://localhost:5002".to_string());
-    let url = format!("{}/v1/embeddings", base.trim_end_matches('/'));
+    let url = crate::llm_config::embeddings_url(&base);
     // A key-gated Lemonade (e.g. cesarops.com/lemonade) needs the configured key here too, not just in chat.
     let auth = crate::llm_config::auth_for_base(&base, &resolved_chat_target());
     let model = model_name.unwrap_or_else(|| "embeddinggemma-300m-f16".to_string());

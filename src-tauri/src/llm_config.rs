@@ -82,6 +82,12 @@ pub fn chat_url(t: &LlmTarget) -> String {
     format!("{}/v1/chat/completions", t.base)
 }
 
+/// Embeddings URL for a server base. A base that already ends in "/v1" (as the docs give for
+/// cesarops.com/lemonade/v1) must not become ".../v1/v1/embeddings".
+pub fn embeddings_url(base: &str) -> String {
+    format!("{}/v1/embeddings", normalize_base(base))
+}
+
 /// Authorization header value for a target, when it has an API key.
 pub fn auth_header(t: &LlmTarget) -> Option<String> {
     t.api_key.as_ref().map(|key| format!("Bearer {}", key))
@@ -139,6 +145,14 @@ fn normalize_base(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embeddings_url_never_doubles_v1() {
+        assert_eq!(embeddings_url("https://cesarops.com/lemonade/v1"), "https://cesarops.com/lemonade/v1/embeddings");
+        assert_eq!(embeddings_url("https://cesarops.com/lemonade/v1/"), "https://cesarops.com/lemonade/v1/embeddings");
+        assert_eq!(embeddings_url("https://cesarops.com/lemonade"), "https://cesarops.com/lemonade/v1/embeddings");
+        assert_eq!(embeddings_url("http://127.0.0.1:13305/api"), "http://127.0.0.1:13305/api/v1/embeddings");
+    }
 
     #[test]
     fn defaults_when_nothing_is_set() {
